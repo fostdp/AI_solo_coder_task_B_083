@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>古代医学文献馆藏微环境监测与古籍病害预测系统</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-logo">📜</div>
+    <div>
+      <h1>古代医学文献馆藏微环境监测与古籍病害预测系统</h1>
+      <div class="brand-sub">Ancient Medical Literature Conservation Monitoring System</div>
+    </div>
+  </div>
+  <div class="top-stats" id="topStats">
+    <div class="stat-card"><div class="stat-label">馆藏医籍</div><div class="stat-value" id="statBooks">30,000</div><div class="stat-unit">册</div></div>
+    <div class="stat-card"><div class="stat-label">书架</div><div class="stat-value" id="statShelves">7</div><div class="stat-unit">组</div></div>
+    <div class="stat-card"><div class="stat-label">环境传感器</div><div class="stat-value" id="statEnv">50</div><div class="stat-unit">台</div></div>
+    <div class="stat-card"><div class="stat-label">pH检测仪</div><div class="stat-value" id="statPh">20</div><div class="stat-unit">台</div></div>
+    <div class="stat-card env"><div class="stat-label">平均温度</div><div class="stat-value" id="statTemp">21.5</div><div class="stat-unit">℃</div></div>
+    <div class="stat-card env"><div class="stat-label">平均湿度</div><div class="stat-value" id="statHumi">48</div><div class="stat-unit">%RH</div></div>
+    <div class="stat-card env"><div class="stat-label">平均pH</div><div class="stat-value" id="statPhv">6.60</div></div>
+    <div class="stat-card alert red"><div class="stat-label">红</div><div class="stat-value" id="alertRed">0</div></div>
+    <div class="stat-card alert orange"><div class="stat-label">橙</div><div class="stat-value" id="alertOrange">2</div></div>
+    <div class="stat-card alert yellow"><div class="stat-label">黄</div><div class="stat-value" id="alertYellow">5</div></div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <h3>藏书楼层</h3>
+      <div class="floor-tabs" id="floorTabs">
+        <button class="floor-tab active" data-floor="1">1F · 明清版本草/医案区</button>
+        <button class="floor-tab" data-floor="2">2F · 珍本手稿/孤本特藏</button>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>书架列表</h3>
+      <div id="shelfList" class="shelf-list"></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>病害热力图层</h3>
+      <div class="layer-controls">
+        <label class="layer active"><input type="checkbox" value="acidosis" checked><span class="dot acidosis"></span>酸化风险</label>
+        <label class="layer active"><input type="checkbox" value="mold" checked><span class="dot mold"></span>霉变风险</label>
+        <label class="layer active"><input type="checkbox" value="insect" checked><span class="dot insect"></span>虫蛀风险</label>
+      </div>
+      <div class="heatmap-legend">
+        <div class="legend-title">风险强度</div>
+        <div class="legend-bar"></div>
+        <div class="legend-scale"><span>安全</span><span>低</span><span>中</span><span>高</span><span>危急</span></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>告警事件</h3>
+      <div id="alertList" class="alert-list">
+        <div class="alert-empty">加载中...</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main-content">
+    <div class="shelf-viewer">
+      <div class="viewer-toolbar">
+        <div class="viewer-title" id="viewerTitle">📚 选择左侧书架开始浏览</div>
+        <div class="viewer-actions">
+          <button class="btn" id="btnRotateL" title="向左旋转">⟲</button>
+          <button class="btn" id="btnReset" title="重置视角">⟳</button>
+          <button class="btn" id="btnRotateR" title="向右旋转">⟳</button>
+          <span class="divider"></span>
+          <button class="btn" id="btnZoomOut" title="缩小">−</button>
+          <span class="zoom-label" id="zoomLabel">100%</span>
+          <button class="btn" id="btnZoomIn" title="放大">+</button>
+          <span class="divider"></span>
+          <button class="btn" id="btnRefresh" title="刷新数据">⟳ 刷新</button>
+        </div>
+      </div>
+      <div class="viewer-canvas-wrap">
+        <canvas id="shelfCanvas" width="1100" height="640"></canvas>
+        <div class="viewer-hint" id="viewerHint">💡 点击书架格口查看详情 · 拖拽旋转 · 滚轮缩放</div>
+      </div>
+    </div>
+
+    <div class="charts-row">
+      <div class="chart-card">
+        <div class="chart-header">
+          <h3>📈 微环境趋势（近90天）</h3>
+          <select id="trendMetric" class="select">
+            <option value="temp">温度 (℃)</option>
+            <option value="humi">相对湿度 (%)</option>
+            <option value="mold">霉菌孢子 (CFU/m³)</option>
+            <option value="light">光照 (lux)</option>
+          </select>
+        </div>
+        <div id="trendChart" class="chart-container"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-header">
+          <h3>🧪 纸张pH老化预测</h3>
+          <div class="chart-sub" id="phPredInfo">当前pH 6.60 → 30天 6.57 → 90天 6.51</div>
+        </div>
+        <div id="phChart" class="chart-container"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-mask hidden" id="slotModal">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <h2 id="modalTitle">格口详情</h2>
+      <button class="close-btn" id="modalClose">×</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script src="js/shelf3d.js"></script>
+<script src="js/trends.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
