@@ -31,8 +31,15 @@ const TrendCharts = (() => {
     if (!el) return;
     const cfg = METRIC_CONFIG[metricKey] || METRIC_CONFIG.temp;
 
-    d3.select(el).selectAll('svg').on('.chart', null);
-    d3.select(el).selectAll('*').remove();
+    const selection = d3.select(el);
+    selection.selectAll('*').on('.chart', null).on('.brush', null).on('.drag', null);
+    selection.selectAll('*').interrupt();
+
+    let svg = selection.select('svg.abm-chart');
+    if (svg.empty()) {
+      svg = selection.append('svg').attr('class', 'abm-chart').style('display', 'block');
+    }
+    svg.selectAll('*').remove();
 
     const rows = (data || []).map(r => ({
       t: _parseTs(r.ts_bucket || r.day || r.timestamp),
@@ -41,14 +48,18 @@ const TrendCharts = (() => {
       lo: cfg.min_key ? +r[cfg.min_key] : null,
     })).filter(r => !isNaN(r.t.getTime()) && isFinite(r.v));
 
-    d3.select(el).selectAll('*').remove();
     if (!rows.length) {
-      d3.select(el).append('div')
-        .style('color', '#64748b').style('font-size', '12px')
-        .style('text-align', 'center').style('padding', '60px 0')
-        .text('暂无趋势数据');
+      svg.attr('width', 10).attr('height', 10).style('display', 'none');
+      let empty = selection.select('div.abm-empty');
+      if (empty.empty()) {
+        empty = selection.append('div').attr('class', 'abm-empty')
+          .style('color', '#64748b').style('font-size', '12px')
+          .style('text-align', 'center').style('padding', '60px 0');
+      }
+      empty.text('暂无趋势数据');
       return;
     }
+    selection.selectAll('div.abm-empty').remove();
 
     const rect = el.getBoundingClientRect();
     const W = rect.width || 600, H = rect.height || 240;
@@ -56,12 +67,10 @@ const TrendCharts = (() => {
     const iw = W - margin.left - margin.right;
     const ih = H - margin.top - margin.bottom;
 
-    const svg = d3.select(el).append('svg')
-      .attr('width', W).attr('height', H)
-      .style('display', 'block');
+    svg.attr('width', W).attr('height', H).style('display', 'block');
 
+    const gradId = 'g-' + (el.__chartGradId || (el.__chartGradId = Math.random().toString(36).slice(2, 8)));
     const defs = svg.append('defs');
-    const gradId = 'g-' + Math.random().toString(36).slice(2, 8);
     const grad = defs.append('linearGradient')
       .attr('id', gradId).attr('x1', '0').attr('x2', '0').attr('y1', '0').attr('y2', '1');
     grad.append('stop').attr('offset', '0%').attr('stop-color', cfg.color).attr('stop-opacity', .45);
@@ -160,12 +169,13 @@ const TrendCharts = (() => {
 
     const bisect = d3.bisector(d => d.t).center;
     svg.append('rect')
+      .attr('class', 'abm-event-capture')
       .attr('x', margin.left).attr('y', margin.top)
       .attr('width', iw).attr('height', ih)
       .attr('fill', 'transparent')
-      .on('mouseenter', () => tip.style('display', null))
-      .on('mouseleave', () => tip.style('display', 'none'))
-      .on('mousemove', (event) => {
+      .on('mouseenter.chart', () => tip.style('display', null))
+      .on('mouseleave.chart', () => tip.style('display', 'none'))
+      .on('mousemove.chart', (event) => {
         const [mx] = d3.pointer(event);
         const xm = mx - margin.left;
         const tm = x.invert(xm);
@@ -195,8 +205,18 @@ const TrendCharts = (() => {
     const el = typeof containerSel === 'string'
       ? document.querySelector(containerSel) : containerSel;
     if (!el) return;
-    d3.select(el).selectAll('svg').on('.chart', null);
-    d3.select(el).selectAll('*').remove();
+
+    const selection = d3.select(el);
+    selection.selectAll('*').on('.chart', null).on('.brush', null).on('.drag', null);
+    selection.selectAll('*').interrupt();
+
+    let svg = selection.select('svg.abm-chart');
+    if (svg.empty()) {
+      svg = selection.append('svg').attr('class', 'abm-chart');
+    }
+    svg.selectAll('*').remove();
+    selection.selectAll('div.abm-empty').remove();
+
     const rect = el.getBoundingClientRect();
     const W = rect.width || 460, H = rect.height || 240;
     const margin = { top: 20, right: 28, bottom: 34, left: 44 };
@@ -220,8 +240,7 @@ const TrendCharts = (() => {
     const allPoints = hist.concat(forecast);
     if (!allPoints.length) return;
 
-    const svg = d3.select(el).append('svg')
-      .attr('width', W).attr('height', H);
+    svg.attr('width', W).attr('height', H);
 
     const x = d3.scaleTime()
       .domain(d3.extent(allPoints, d => d.t))
@@ -310,23 +329,39 @@ const TrendCharts = (() => {
     const el = typeof containerSel === 'string'
       ? document.querySelector(containerSel) : containerSel;
     if (!el) return;
-    d3.select(el).selectAll('svg').on('.chart', null);
-    d3.select(el).selectAll('*').remove();
+
+    const selection = d3.select(el);
+    selection.selectAll('*').on('.chart', null).on('.brush', null).on('.drag', null);
+    selection.selectAll('*').interrupt();
+
+    let svg = selection.select('svg.abm-chart');
+    if (svg.empty()) {
+      svg = selection.append('svg').attr('class', 'abm-chart');
+    }
+    svg.selectAll('*').remove();
+
     const data = (rows || []).map(r => ({
       t: _parseTs(r.day || r.timestamp),
       ph: +(r.ph_avg ?? r.ph_value ?? 7),
     })).filter(r => !isNaN(r.t.getTime()) && isFinite(r.ph));
+
     if (!data.length) {
-      d3.select(el).append('div')
-        .style('color', '#64748b').style('font-size', '11px')
-        .style('padding', '40px 0').style('text-align', 'center')
-        .text('暂无pH历史数据');
+      svg.attr('width', 10).attr('height', 10).style('display', 'none');
+      let empty = selection.select('div.abm-empty');
+      if (empty.empty()) {
+        empty = selection.append('div').attr('class', 'abm-empty')
+          .style('color', '#64748b').style('font-size', '11px')
+          .style('padding', '40px 0').style('text-align', 'center');
+      }
+      empty.text('暂无pH历史数据');
       return;
     }
+    selection.selectAll('div.abm-empty').remove();
+
     const rect = el.getBoundingClientRect();
     const W = rect.width || 400, H = rect.height || 160;
     const m = { top: 10, right: 10, bottom: 22, left: 34 };
-    const svg = d3.select(el).append('svg').attr('width', W).attr('height', H);
+    svg.attr('width', W).attr('height', H).style('display', 'block');
     const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
     const iw = W - m.left - m.right, ih = H - m.top - m.bottom;
     const x = d3.scaleTime().domain(d3.extent(data, d => d.t)).range([0, iw]);

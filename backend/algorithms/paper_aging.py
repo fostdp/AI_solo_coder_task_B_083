@@ -1,5 +1,6 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
 
 
 @dataclass
@@ -26,26 +27,61 @@ class PaperAgingModel:
     DP_END_OF_LIFE = 200
 
     ACTIVATION_ENERGIES = {
-        "bamboo": 105.0,
-        "bark": 110.0,
+        "bamboo": 78.0,
+        "bark": 85.0,
         "xuan": 95.0,
         "hemp": 100.0,
+        "straw": 76.0,
+        "cotton": 90.0,
+        "mixed": 85.0,
+        "default": 85.0,
     }
-    DEFAULT_EA = 100.0
+    DEFAULT_EA = 85.0
 
     PAPER_TYPE_FACTORS = {
-        "bamboo": 1.2,
-        "bark": 1.0,
-        "xuan": 0.8,
-        "hemp": 1.1,
+        "bamboo": 1.20,
+        "bark": 1.00,
+        "xuan": 0.80,
+        "hemp": 1.10,
+        "straw": 1.25,
+        "cotton": 0.90,
+        "mixed": 1.10,
+        "default": 1.10,
     }
-    DEFAULT_PAPER_TYPE_FACTOR = 1.0
+    DEFAULT_PAPER_TYPE_FACTOR = 1.10
+
+    PAPER_TYPE_NAME_MAP = {
+        "竹纸": "bamboo", "竹": "bamboo", "毛竹纸": "bamboo", "bamboo": "bamboo", "zhu": "bamboo", "zhuzhi": "bamboo",
+        "皮纸": "bark", "皮": "bark", "楮皮纸": "bark", "桑皮纸": "bark", "构皮纸": "bark", "bark": "bark", "pi": "bark", "pizhi": "bark",
+        "宣纸": "xuan", "宣": "xuan", "泾县纸": "xuan", "xuan": "xuan", "xuanzhi": "xuan",
+        "麻纸": "hemp", "麻": "hemp", "苎麻纸": "hemp", "大麻纸": "hemp", "hemp": "hemp", "ma": "hemp", "mazhi": "hemp",
+        "草纸": "straw", "稻草纸": "straw", "麦秆纸": "straw", "straw": "straw", "cao": "straw",
+        "棉纸": "cotton", "棉": "cotton", "棉料纸": "cotton", "cotton": "cotton", "mian": "cotton",
+        "混合纸": "mixed", "混料纸": "mixed", "竹棉混合": "mixed", "皮麻混合": "mixed", "mixed": "mixed",
+        "default": "default", "": "default", "unknown": "default", None: "default",
+    }
+
+    PAPER_TYPE_DISPLAY_NAMES = {
+        "bamboo": "竹纸", "bark": "皮纸", "xuan": "宣纸",
+        "hemp": "麻纸", "straw": "草纸", "cotton": "棉纸",
+        "mixed": "混合纸", "default": "默认/未标注",
+    }
+
+    def _normalize_paper_type(self, paper_type: str) -> str:
+        if not paper_type:
+            return "mixed"
+        key = str(paper_type).strip().lower()
+        if key in self.ACTIVATION_ENERGIES:
+            return key
+        return self.PAPER_TYPE_NAME_MAP.get(key, self.PAPER_TYPE_NAME_MAP.get(str(paper_type).strip(), "mixed"))
 
     def _get_ea(self, paper_type: str) -> float:
-        return self.ACTIVATION_ENERGIES.get(paper_type, self.DEFAULT_EA)
+        norm = self._normalize_paper_type(paper_type)
+        return self.ACTIVATION_ENERGIES.get(norm, self.DEFAULT_EA)
 
     def _get_paper_type_factor(self, paper_type: str) -> float:
-        return self.PAPER_TYPE_FACTORS.get(paper_type, self.DEFAULT_PAPER_TYPE_FACTOR)
+        norm = self._normalize_paper_type(paper_type)
+        return self.PAPER_TYPE_FACTORS.get(norm, self.DEFAULT_PAPER_TYPE_FACTOR)
 
     def _arrhenius_ratio(self, ea_kj: float, temp_c: float) -> float:
         ea_j = ea_kj * 1000.0

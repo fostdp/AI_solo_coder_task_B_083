@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import threading
@@ -7,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
 from ..config import settings
-from ..database import get_ch
+from ..database import get_batch_writer
 from .alert_manager import alert_manager
 
 try:
@@ -19,7 +18,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class MqttBatchWriter:
+class MqttIngestService:
     ENV_COLS = [
         "timestamp", "sensor_id", "shelf_id", "slot_id",
         "temperature", "humidity", "light_lux", "voc_ppm",
@@ -31,12 +30,11 @@ class MqttBatchWriter:
     ]
 
     def __init__(self):
-        self._env_batch: List[List[Any]] = []
-        self._ph_batch: List[List[Any]] = []
-        self._lock = threading.Lock()
-        self._flush_thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
+        self._mqtt: Optional[Any] = None
         self._ph_cache: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._writer = get_batch_writer()
+        self._stop = threading.Event()
 
     def start(self):
         if HAS_PAHO:
@@ -57,9 +55,8 @@ class MqttBatchWriter:
             logger.warning("paho-mqtt not installed, MQTT ingestion disabled")
             self._mqtt = None
 
-        self._flush_thread = threading.Thread(target=self._flush_loop, name="ch_flusher", daemon=True)
-        self._flush_thread.start()
-        logger.info("Batch flush loop started")
+        self._writer.start()
+        logger.info("MQTT ingestion service started with BatchWriter")
 
     def stop(self):
         self._stop.set()
@@ -69,9 +66,8 @@ class MqttBatchWriter:
                 self._mqtt.disconnect()
             except Exception:
                 pass
-        if self._flush_thread:
-            self._flush_thread.join(timeout=10)
-        self._flush(force=True)
+        self._writer.stop(flush=True)
+        logger.info("MQTT ingestion service stopped")
 
     def _on_connect(self, client, userdata, flags, rc, *args, **kwargs):
         if rc == 0:
@@ -113,10 +109,10 @@ class MqttBatchWriter:
                 f"{temperature}", f"{humidity}", f"{light_lux}", f"{voc_ppm}",
                 f"{mold_spores}", f"{active_mold}", f"{rssi}",
             ]
-            with self._lock:
-                self._env_batch.append(row)
+            self._writer.add("env_sensor_data", self.ENV_COLS, row)
 
-            ph_value = self._ph_cache.get(slot_id)
+            with self._lock:
+                ph_value = self._ph_cache.get(slot_id)
             sensor_ph_id = data.get("sensor_ph_id", f"PH-{int(hash(slot_id) % 20) + 1:03d}")
             alert_manager.evaluate_and_alert(
                 shelf_id=shelf_id, slot_id=slot_id,
@@ -152,51 +148,22 @@ class MqttBatchWriter:
                 f"{ts}", f"'{sensor_id}'", f"'{shelf_id}'", f"'{slot_id}'",
                 f"{ph_value}", f"'{paper_cond}'", f"{rssi}",
             ]
-            with self._lock:
-                self._ph_batch.append(row)
+            self._writer.add("ph_sensor_data", self.PH_COLS, row)
 
-            self._ph_cache[slot_id] = ph_value
+            with self._lock:
+                self._ph_cache[slot_id] = ph_value
             return True
         except Exception as e:
             logger.error(f"Ingest ph error: {e}")
             return False
 
-    def _flush_loop(self):
-        while not self._stop.is_set():
-            try:
-                time.sleep(settings.batch_flush_interval)
-                self._flush()
-            except Exception as e:
-                logger.error(f"Flush loop error: {e}")
-        self._flush(force=True)
+    @property
+    def queue_size(self) -> int:
+        return self._writer.queue_size()
 
-    def _flush(self, force: bool = False):
-        env_rows: List[List[Any]] = []
-        ph_rows: List[List[Any]] = []
-        with self._lock:
-            if force or len(self._env_batch) >= settings.batch_size:
-                env_rows = self._env_batch
-                self._env_batch = []
-            if force or len(self._ph_batch) >= settings.batch_size:
-                ph_rows = self._ph_batch
-                self._ph_batch = []
-
-        if env_rows:
-            try:
-                get_ch().batch_insert("env_sensor_data", self.ENV_COLS, env_rows)
-                logger.debug(f"Flushed {len(env_rows)} env rows")
-            except Exception as e:
-                logger.error(f"Flush env error: {e}")
-                with self._lock:
-                    self._env_batch = env_rows + self._env_batch
-        if ph_rows:
-            try:
-                get_ch().batch_insert("ph_sensor_data", self.PH_COLS, ph_rows)
-                logger.debug(f"Flushed {len(ph_rows)} ph rows")
-            except Exception as e:
-                logger.error(f"Flush ph error: {e}")
-                with self._lock:
-                    self._ph_batch = ph_rows + self._ph_batch
+    @property
+    def stats(self) -> Dict[str, Any]:
+        return self._writer.stats
 
 
-mqtt_writer = MqttBatchWriter()
+mqtt_ingest = MqttIngestService()

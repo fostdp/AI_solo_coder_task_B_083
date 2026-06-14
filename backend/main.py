@@ -32,14 +32,14 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def on_startup():
-    logger.info("Starting MQTT batch writer")
-    mqtt_writer.start()
+    logger.info("Starting MQTT ingestion service with BatchWriter")
+    mqtt_ingest.start()
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    logger.info("Stopping MQTT batch writer")
-    mqtt_writer.stop()
+    logger.info("Stopping MQTT ingestion service")
+    mqtt_ingest.stop()
 
 
 @app.get("/", tags=["Root"])

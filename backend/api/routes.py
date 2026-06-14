@@ -94,6 +94,31 @@ async def list_slots(shelf_id: str):
     return {"data": rows}
 
 
+def _estimate_book_age(dynasty: Optional[str], slot_id: Optional[str] = None) -> float:
+    now_year = datetime.now().year
+    dy = str(dynasty or "").strip()
+    if "宋" in dy or dy in ("Song", "song"):
+        return float(now_year - 1200)
+    if "元" in dy or dy in ("Yuan", "yuan"):
+        return float(now_year - 1360)
+    if "明" in dy or dy in ("Ming", "ming"):
+        return float(now_year - 1600)
+    if "清" in dy or dy in ("Qing", "qing"):
+        return float(now_year - 1820)
+    if "民国" in dy or dy in ("Minguo", "Republic", "ROC"):
+        return float(now_year - 1930)
+    if "唐" in dy or dy in ("Tang", "tang"):
+        return float(now_year - 1200)
+    if slot_id:
+        seed = abs(hash(slot_id)) % 10
+        if seed < 4:
+            return float(now_year - 1780)
+        if seed < 8:
+            return float(now_year - 1600)
+        return float(now_year - 1880)
+    return 180.0
+
+
 def _generate_dummy_slots(shelf_id: str) -> List[Dict]:
     shelf_sql = "SELECT * FROM bookshelf_metadata WHERE shelf_id = {sid:String}"
     shelf = get_ch().query_one(shelf_sql, {"sid": shelf_id})
@@ -324,9 +349,10 @@ async def get_heatmap_data(shelf_id: str):
         ph_val = float(ph.get("ph_avg") if ph.get("ph_avg") is not None else round(6.8 - (hash(sid + "p") % 250) / 100, 2))
 
         paper_type = slot_paper_types.get(sid, slot.get("paper_type", "default"))
+        book_age = _estimate_book_age(slot.get("book_dynasty", ""), sid)
 
         mold_risk = mold_growth_model.evaluate(temp, humi, 72, mold, active)
-        aging = paper_aging_model.full_prediction(ph_val, temp, humi, 0.5, 150, paper_type)
+        aging = paper_aging_model.full_prediction(ph_val, temp, humi, 0.5, book_age, paper_type)
 
         acid_score = max(0.0, min(1.0, (7.0 - ph_val) / 2.5))
         mold_score = mold_risk.mold_risk_index
@@ -385,6 +411,11 @@ async def get_heatmap_data(shelf_id: str):
 
 
 # ---------- 预测算法 ----------
+
+@router.get("/predict/activation-energy-table", tags=["Prediction"])
+async def get_activation_energy_table():
+    return {"data": paper_aging_model.get_activation_energy_table()}
+
 
 @router.post("/predict/paper-aging", tags=["Prediction"])
 async def predict_paper_aging(req: PredictionRequest):

@@ -22,6 +22,14 @@ class Shelf3DRenderer {
     this.hitMap = [];
     this.hoverSlot = null;
     this._cachedImageData = null;
+    this._cachedImageDataW = 0;
+    this._cachedImageDataH = 0;
+    this._cachedViewKey = null;
+    this._cachedHeatKey = null;
+    this._prevHeatKey = null;
+    this._offscreenCanvas = null;
+    this._offCtx = null;
+    this._bgCacheDirty = true;
 
     this.layers = { acidosis: true, mold: true, insect: true };
     this._isDragging = false;
@@ -44,6 +52,10 @@ class Shelf3DRenderer {
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.cx = this.w / 2;
     this.cy = this.h / 2 + 30;
+    this._bgCacheDirty = true;
+    this._cachedImageData = null;
+    this._cachedImageDataW = 0;
+    this._cachedImageDataH = 0;
   }
 
   setShelf(shelfId, rows, cols, slots) {
@@ -51,11 +63,14 @@ class Shelf3DRenderer {
     this.slots = slots || [];
     this._cachedImageData = null;
     this._prevHeatKey = null;
+    this._bgCacheDirty = true;
     this.requestRender();
   }
 
   setLayers(layers) {
     this.layers = { ...this.layers, ...layers };
+    this._bgCacheDirty = true;
+    this._cachedImageData = null;
     this.requestRender();
   }
 
@@ -192,16 +207,33 @@ class Shelf3DRenderer {
   _render() {
     this._animId = null;
     const ctx = this.ctx;
+    const cw = this.canvas.width;
+    const ch = this.canvas.height;
+
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.clearRect(0, 0, cw, ch);
+
+    if (this._cachedImageData &&
+        this._cachedImageDataW === cw &&
+        this._cachedImageDataH === ch &&
+        !this._bgCacheDirty) {
+      ctx.putImageData(this._cachedImageData, 0, 0);
+      ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      ctx.restore();
+      this._bgCacheDirty = false;
+      this._renderOverlay(ctx);
+      return;
+    }
+
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.restore();
     this.hitMap = [];
-    this._cachedImageData = null;
+    this._bgCacheDirty = false;
 
     if (!this.shelf) {
       this._drawEmptyState();
+      this._saveBgImageData(ctx, cw, ch);
       return;
     }
 
@@ -267,6 +299,65 @@ class Shelf3DRenderer {
     });
 
     this._drawLegendOnCanvas();
+
+    this._saveBgImageData(ctx, cw, ch);
+  }
+
+  _saveBgImageData(ctx, cw, ch) {
+    try {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this._cachedImageData = ctx.getImageData(0, 0, cw, ch);
+      this._cachedImageDataW = cw;
+      this._cachedImageDataH = ch;
+      ctx.restore();
+    } catch (e) {
+      this._cachedImageData = null;
+    }
+  }
+
+  _renderOverlay(ctx) {
+    if (this.hoverSlot && this.shelf) {
+      const { rows, cols } = this.shelf;
+      const unitW = 70, unitH = 82, unitD = 60;
+      const shelfW = cols * unitW;
+      const shelfH = rows * unitH;
+      const cosY = Math.cos(this.view.rotY);
+      const sinY = Math.sin(this.view.rotY);
+      const cosX = Math.cos(this.view.rotX);
+      const sinX = Math.sin(this.view.rotX);
+
+      let slot = this.hoverSlot;
+      if (slot && slot.slot && slot.bx !== undefined) {
+        const pad = 3;
+        const iw = unitW - pad * 2;
+        const ih = unitH - pad * 2;
+        const id = unitD - pad * 2;
+        const corners = [
+          [slot.bx - iw / 2, slot.by + ih / 2, -id / 2],
+          [slot.bx + iw / 2, slot.by + ih / 2, -id / 2],
+          [slot.bx + iw / 2, slot.by + ih / 2,  id / 2],
+          [slot.bx - iw / 2, slot.by + ih / 2,  id / 2],
+          [slot.bx - iw / 2, slot.by - ih / 2, -id / 2],
+          [slot.bx + iw / 2, slot.by - ih / 2, -id / 2],
+          [slot.bx + iw / 2, slot.by - ih / 2,  id / 2],
+          [slot.bx - iw / 2, slot.by - ih / 2,  id / 2],
+        ].map(p => this._project(p[0], p[1], p[2], cosY, sinY, cosX, sinX));
+
+        const hoverInset = 1.5;
+        const frontPath = new Path2D();
+        frontPath.moveTo(corners[4].sx + hoverInset, corners[4].sy + hoverInset);
+        frontPath.lineTo(corners[5].sx - hoverInset, corners[5].sy + hoverInset);
+        frontPath.lineTo(corners[1].sx - hoverInset, corners[1].sy - hoverInset);
+        frontPath.lineTo(corners[0].sx + hoverInset, corners[0].sy - hoverInset);
+        frontPath.closePath();
+        ctx.save();
+        ctx.strokeStyle = 'rgba(253, 224, 71, .9)';
+        ctx.lineWidth = 2;
+        ctx.stroke(frontPath);
+        ctx.restore();
+      }
+    }
   }
 
   _project(x, y, z, cosY, sinY, cosX, sinX) {

@@ -14,8 +14,9 @@ class Settings(BaseSettings):
     mqtt_topic_ph: str = "sensor/ph/+"
     sensor_count_env: int = 50
     sensor_count_ph: int = 20
-    batch_size: int = 100
-    batch_flush_interval: float = 5.0
+    batch_size: int = 500
+    batch_flush_interval: float = 30.0
+    batch_max_retries: int = 3
     dingtalk_webhook: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
