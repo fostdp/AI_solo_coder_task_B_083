@@ -267,3 +267,285 @@ def calculate_reduction_rate(spores_before: float, spores_after: float) -> float
     if spores_before <= 0:
         return 0.0
     return max(0.0, min(1.0, (spores_before - spores_after) / spores_before))
+
+
+@dataclass
+class ZIPResult:
+    """零膨胀泊松模型结果"""
+    pi: float
+    lambda_: float
+    log_likelihood: float
+    converged: bool
+    iterations: int
+    zero_inflation_ratio: float
+
+
+def _zip_pmf(k: int, pi: float, lambda_: float) -> float:
+    """
+    零膨胀泊松分布PMF
+    
+    P(Y=k) = pi * I(k=0) + (1-pi) * Poisson(k; lambda)
+    """
+    import math
+    if k == 0:
+        return pi + (1 - pi) * math.exp(-lambda_)
+    else:
+        return (1 - pi) * (lambda_ ** k) * math.exp(-lambda_) / math.factorial(k)
+
+
+def _zip_log_likelihood(data: List[int], pi: float, lambda_: float) -> float:
+    """计算ZIP模型的对数似然"""
+    import math
+    ll = 0.0
+    for k in data:
+        pmf = _zip_pmf(k, pi, lambda_)
+        if pmf <= 0:
+            pmf = 1e-15
+        ll += math.log(pmf)
+    return ll
+
+
+def fit_zero_inflated_poisson(
+    data: List[int],
+    max_iter: int = 200,
+    tol: float = 1e-6
+) -> ZIPResult:
+    """
+    使用EM算法拟合零膨胀泊松模型（修复：零膨胀数据后验震荡问题）
+    
+    修复说明：
+    - 原Beta-Binomial模型假设二项分布，不适用大量零值的霉菌数据
+    - ZIP模型：P(Y=0) = π + (1-π)e^(-λ),  P(Y=k) = (1-π)Poisson(k,λ)
+    - EM算法交替估计结构零概率π和泊松强度λ
+    - 自动检测零膨胀率，当零值比例>40%时优先使用ZIP
+    
+    Args:
+        data: 孢子浓度计数列表（整数）
+        max_iter: EM最大迭代次数
+        tol: 收敛阈值
+    
+    Returns:
+        ZIPResult 包含拟合参数和对数似然
+    """
+    import math
+
+    if not data:
+        return ZIPResult(pi=0.0, lambda_=0.0, log_likelihood=0.0,
+                         converged=False, iterations=0, zero_inflation_ratio=0.0)
+
+    n = len(data)
+    y = [int(max(0, round(v))) for v in data]
+
+    zero_count = sum(1 for v in y if v == 0)
+    zero_ratio = zero_count / n
+
+    pi_init = max(0.01, min(0.9, (zero_ratio - 0.1) / max(zero_ratio, 0.01)))
+    lambda_init = sum(y) / max(n - zero_count, 1)
+
+    pi = pi_init
+    lambda_ = max(lambda_init, 0.1)
+    prev_ll = float('-inf')
+    converged = False
+
+    for iteration in range(1, max_iter + 1):
+        # E步: 计算每个零值属于结构零的后验概率
+        Z = []
+        for k in y:
+            if k == 0:
+                p_structural = pi
+                p_poisson_zero = (1 - pi) * math.exp(-lambda_)
+                p_total = p_structural + p_poisson_zero
+                if p_total < 1e-15:
+                    z_ij = 0.5
+                else:
+                    z_ij = p_structural / p_total
+            else:
+                z_ij = 0.0
+            Z.append(z_ij)
+
+        # M步: 更新参数
+        sum_Z = sum(Z)
+        sum_1mZ = sum(1 - z for z in Z)
+        sum_y_1mZ = sum((1 - z) * k for z, k in zip(Z, y))
+
+        pi = sum_Z / n
+        pi = max(0.001, min(0.999, pi))
+
+        if sum_1mZ > 0:
+            lambda_ = sum_y_1mZ / sum_1mZ
+        lambda_ = max(0.01, lambda_)
+
+        # 计算对数似然检查收敛
+        ll = _zip_log_likelihood(y, pi, lambda_)
+        if abs(ll - prev_ll) < tol:
+            converged = True
+            break
+        prev_ll = ll
+
+    return ZIPResult(
+        pi=pi,
+        lambda_=lambda_,
+        log_likelihood=prev_ll,
+        converged=converged,
+        iterations=iteration,
+        zero_inflation_ratio=zero_ratio,
+    )
+
+
+def detect_zero_inflation(data: List[float]) -> Tuple[bool, float]:
+    """
+    检测数据是否存在零膨胀
+    
+    Returns:
+        (是否零膨胀, 零值比例)
+    """
+    if not data:
+        return False, 0.0
+
+    n = len(data)
+    zero_count = sum(1 for v in data if v <= 1e-10)
+    zero_ratio = zero_count / n
+
+    import math
+    mean_val = sum(data) / n
+    var_val = sum((v - mean_val) ** 2 for v in data) / n
+
+    is_zi = zero_ratio > 0.4 or (mean_val > 0 and var_val > 2 * mean_val)
+    return is_zi, zero_ratio
+
+
+def bayesian_efficacy_estimation(
+    treatment_data: List[Dict[str, Any]],
+    control_data: List[Dict[str, Any]],
+    prior_alpha: float = 2.0,
+    prior_beta: float = 2.0,
+    ci_level: float = 0.95
+) -> BayesianEfficacyResult:
+    """
+    贝叶斯药效评估（修复：零膨胀数据稳定性）
+    
+    修复说明：
+    - 自动检测治疗组/对照组的零膨胀特征
+    - 若存在零膨胀（零值>40%或方差>>均值），改用ZIP模型估计
+    - ZIP模型对比治疗组与对照组的结构零概率π差和泊松强度λ比
+    - 结果与Beta-Binomial统一接口，保持向下兼容
+    
+    比较治疗组与对照组的霉菌孢子浓度，使用Beta-Binomial共轭先验模型
+    评估药方的防霉效果。
+    
+    Args:
+        treatment_data: 治疗组数据，每个元素包含spores_before和spores_after
+        control_data: 对照组数据，每个元素包含spores_before和spores_after
+        prior_alpha: Beta先验分布参数alpha，默认2.0
+        prior_beta: Beta先验分布参数beta，默认2.0
+        ci_level: 可信区间水平，默认0.95
+    
+    Returns:
+        BayesianEfficacyResult 包含所有药效评估指标
+    """
+    if not treatment_data:
+        raise ValueError("治疗组数据不能为空")
+    if not control_data:
+        raise ValueError("对照组数据不能为空")
+    if prior_alpha <= 0 or prior_beta <= 0:
+        raise ValueError("先验参数必须为正数")
+
+    treatment_before_vals = [d["spores_before"] for d in treatment_data]
+    treatment_after_vals = [d["spores_after"] for d in treatment_data]
+    control_before_vals = [d["spores_before"] for d in control_data]
+    control_after_vals = [d["spores_after"] for d in control_data]
+
+    treatment_zi, _ = detect_zero_inflation(treatment_after_vals)
+    control_zi, _ = detect_zero_inflation(control_after_vals)
+    use_zip = treatment_zi or control_zi
+
+    if use_zip:
+        zip_treatment = fit_zero_inflated_poisson(treatment_after_vals)
+        zip_control = fit_zero_inflated_poisson(control_after_vals)
+
+        pi_reduction = 0.0
+        if zip_control.pi > 0:
+            pi_reduction = max(0.0, (zip_treatment.pi - zip_control.pi))
+
+        lambda_ratio = 0.0
+        if zip_control.lambda_ > 0:
+            lambda_ratio = max(0.0, 1.0 - zip_treatment.lambda_ / zip_control.lambda_)
+
+        structural_zero_effect = (zip_treatment.pi - zip_control.pi)
+        poisson_effect = lambda_ratio
+
+        overall_efficacy = 0.5 * structural_zero_effect + 0.5 * lambda_ratio
+        reduction_rate = max(0.0, min(1.0, overall_efficacy))
+
+        n = len(treatment_data)
+        expected_pi_effect = 0.5
+        success_count = 0
+        for i in range(n):
+            tb = treatment_before_vals[i]
+            ta = treatment_after_vals[i]
+            cb = control_before_vals[i % len(control_before_vals)]
+            ca = control_after_vals[i % len(control_after_vals)]
+            if tb > 0:
+                t_reduct = (tb - ta) / tb
+                c_reduct = (cb - ca) / max(cb, 1e-10)
+                if t_reduct > c_reduct:
+                    success_count += 1
+
+        posterior_alpha, posterior_beta = beta_binomial_posterior(
+            prior_alpha, prior_beta, success_count, n
+        )
+    else:
+        treatment_before = sum(treatment_before_vals) / len(treatment_data)
+        treatment_after = sum(treatment_after_vals) / len(treatment_data)
+        control_before = sum(control_before_vals) / len(control_data)
+        control_after = sum(control_after_vals) / len(control_data)
+
+        if treatment_before <= 0:
+            reduction_rate = 0.0
+        else:
+            treatment_reduction = (treatment_before - treatment_after) / treatment_before
+            control_reduction = (control_before - control_after) / max(control_before, 1e-10)
+            reduction_rate = max(0.0, treatment_reduction - control_reduction)
+
+        n = len(treatment_data)
+
+        base_reduction = 0.0
+        if control_before > 0:
+            base_reduction = (control_before - control_after) / control_before
+
+        success_count = 0
+        for d in treatment_data:
+            if d["spores_before"] > 0:
+                reduction = (d["spores_before"] - d["spores_after"]) / d["spores_before"]
+                if reduction > base_reduction:
+                    success_count += 1
+
+        posterior_alpha, posterior_beta = beta_binomial_posterior(
+            prior_alpha, prior_beta, success_count, n
+        )
+
+    posterior_mean = posterior_alpha / (posterior_alpha + posterior_beta)
+    posterior_var = (posterior_alpha * posterior_beta) / (
+        (posterior_alpha + posterior_beta) ** 2 * (posterior_alpha + posterior_beta + 1)
+    )
+
+    ci_low, ci_high = credible_interval(posterior_alpha, posterior_beta, ci_level)
+
+    result = BayesianEfficacyResult(
+        posterior_alpha=posterior_alpha,
+        posterior_beta=posterior_beta,
+        posterior_mean=posterior_mean,
+        posterior_var=posterior_var,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        reduction_rate=reduction_rate,
+        sample_size=n
+    )
+
+    logger.debug(f"贝叶斯评估完成: 成功率={success_count}/{n}, "
+                 f"后验均值={posterior_mean:.4f}, "
+                 f"95%CI=[{ci_low:.4f}, {ci_high:.4f}], "
+                 f"相对减少率={reduction_rate:.4f}, "
+                 f"使用ZIP模型={use_zip}")
+
+    return result

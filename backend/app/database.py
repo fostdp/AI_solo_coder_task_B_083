@@ -11,6 +11,155 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
+class NamedConnectionPool:
+    """
+    命名ClickHouse连接池（修复：跨馆藏比对与老化预测争夺连接池问题）
+    
+    修复说明：
+    - 原架构：全局单例Client，所有任务共用一个TCP连接
+    - 问题：凌晨2点老化预测与跨馆藏比对同时运行，连接互斥导致写入超时
+    - 方案：每个业务域（primary/comparator/aging）独立连接池，物理隔离
+    - 默认池大小：primary=4, comparator=2, aging=3
+    """
+
+    def __init__(self, name: str, max_connections: int = 4):
+        self.name = name
+        self.max_connections = max_connections
+        self._pool: "queue.Queue[Client]" = queue.Queue(maxsize=max_connections)
+        self._created_count = 0
+        self._lock = threading.Lock()
+        self._total_checkouts = 0
+        self._total_returns = 0
+        self._timeouts = 0
+
+    def _create_client(self) -> Optional[Client]:
+        """创建新的ClickHouse连接"""
+        try:
+            client = Client(
+                host=settings.CLICKHOUSE_HOST,
+                port=settings.CLICKHOUSE_PORT,
+                user=settings.CLICKHOUSE_USER,
+                password=settings.CLICKHOUSE_PASSWORD,
+                database=settings.CLICKHOUSE_DATABASE,
+                connect_timeout=10,
+                send_receive_timeout=30,
+            )
+            logger.info(f"[{self.name}] 创建ClickHouse连接 (池大小={self.max_connections}, "
+                        f"已创建={self._created_count + 1})")
+            return client
+        except Exception as e:
+            logger.error(f"[{self.name}] 创建ClickHouse连接失败: {e}")
+            return None
+
+    def acquire(self, timeout: float = 5.0) -> Optional[Client]:
+        """
+        从连接池获取连接
+        
+        Args:
+            timeout: 等待超时时间（秒）
+            
+        Returns:
+            Client 或 None（超时）
+        """
+        start_time = time.time()
+
+        try:
+            client = self._pool.get_nowait()
+            self._total_checkouts += 1
+            return client
+        except queue.Empty:
+            pass
+
+        with self._lock:
+            if self._created_count < self.max_connections:
+                client = self._create_client()
+                if client:
+                    self._created_count += 1
+                    self._total_checkouts += 1
+                    return client
+
+        wait_start = time.time()
+        try:
+            remaining = timeout - (time.time() - start_time)
+            if remaining > 0:
+                client = self._pool.get(timeout=remaining)
+                self._total_checkouts += 1
+                return client
+        except queue.Empty:
+            pass
+
+        self._timeouts += 1
+        logger.warning(f"[{self.name}] 连接池获取超时 (已等待{time.time()-wait_start:.1f}s, "
+                       f"超时总数={self._timeouts})")
+        return None
+
+    def release(self, client: Client) -> None:
+        """归还连接到连接池"""
+        if client is None:
+            return
+        try:
+            self._pool.put_nowait(client)
+            self._total_returns += 1
+        except queue.Full:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            with self._lock:
+                self._created_count -= 1
+
+    def close_all(self) -> None:
+        """关闭所有连接"""
+        closed = 0
+        while not self._pool.empty():
+            try:
+                client = self._pool.get_nowait()
+                client.disconnect()
+                closed += 1
+            except (queue.Empty, Exception):
+                pass
+        logger.info(f"[{self.name}] 连接池已关闭，释放{closed}个连接")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """获取连接池统计"""
+        return {
+            "name": self.name,
+            "max_connections": self.max_connections,
+            "created": self._created_count,
+            "idle": self._pool.qsize(),
+            "checkouts": self._total_checkouts,
+            "returns": self._total_returns,
+            "timeouts": self._timeouts,
+        }
+
+
+_connection_pools: Dict[str, NamedConnectionPool] = {}
+_pool_lock = threading.Lock()
+
+
+def get_connection_pool(name: str = "primary", max_connections: int = 4) -> NamedConnectionPool:
+    """
+    获取或创建命名连接池（工厂函数）
+    
+    连接池命名规范：
+    - "primary":    主业务连接池（4连接）- 传感器写入、老化预测等
+    - "comparator": 跨馆藏比对连接池（2连接）- 独立隔离，凌晨专用
+    - "aging":      老化引擎连接池（3连接）- 独立隔离，批量计算用
+    """
+    with _pool_lock:
+        if name not in _connection_pools:
+            _connection_pools[name] = NamedConnectionPool(name, max_connections)
+        return _connection_pools[name]
+
+
+def close_all_pools() -> None:
+    """关闭所有连接池"""
+    with _pool_lock:
+        for name, pool in _connection_pools.items():
+            pool.close_all()
+        _connection_pools.clear()
+
+
 class BatchWriter:
     """
     异步批量写入器
@@ -217,15 +366,19 @@ class BatchWriter:
 
 class ClickHouseManager:
     """
-    ClickHouse数据库管理器
-    负责连接管理、数据写入、查询
-
-    写入优化：使用BatchWriter实现异步批量写入
-    - 触发条件：队列满500条 或 距离上次写入超过30秒
-    - 相比逐条INSERT，写入性能提升10-100倍
+    ClickHouse数据库管理器（修复：连接池隔离）
+    
+    修复说明：
+    - 支持 pool_name 参数指定独立连接池
+    - comparator 使用 "comparator" 池（2连接），不与主业务争用
+    - 所有查询/写入操作：从池获取连接→执行→归还，自动管理
     """
 
-    def __init__(self):
+    def __init__(self, pool_name: str = "primary", pool_size: int = 4):
+        self.pool_name = pool_name
+        self.pool_size = pool_size
+        self.pool = get_connection_pool(pool_name, pool_size)
+
         self.client: Optional[Client] = None
         self.batch_writer: Optional[BatchWriter] = None
         self._env_buffer: List[Dict] = []
@@ -233,16 +386,15 @@ class ClickHouseManager:
         self._alert_buffer: List[Dict] = []
 
     def connect(self):
-        """建立连接"""
+        """建立连接（通过连接池）"""
         try:
-            self.client = Client(
-                host=settings.CLICKHOUSE_HOST,
-                port=settings.CLICKHOUSE_PORT,
-                user=settings.CLICKHOUSE_USER,
-                password=settings.CLICKHOUSE_PASSWORD,
-                database=settings.CLICKHOUSE_DATABASE
-            )
-            logger.info("ClickHouse连接成功")
+            client = self.pool.acquire(timeout=10.0)
+            if client is None:
+                logger.error(f"[{self.pool_name}] 获取连接失败")
+                return False
+
+            self.client = client
+            logger.info(f"[{self.pool_name}] ClickHouse连接成功 (池大小={self.pool_size})")
 
             self.batch_writer = BatchWriter(
                 client=self.client,
@@ -273,17 +425,36 @@ class ClickHouseManager:
 
             return True
         except Exception as e:
-            logger.error(f"ClickHouse连接失败: {e}")
+            logger.error(f"[{self.pool_name}] ClickHouse连接失败: {e}")
             return False
 
     def close(self):
-        """关闭连接"""
+        """关闭连接（归还到连接池）"""
         if self.batch_writer:
             self.batch_writer.stop()
             self.batch_writer = None
         if self.client:
-            self.client.disconnect()
+            self.pool.release(self.client)
             self.client = None
+
+    def _execute_with_pool(self, query: str, params: Dict = None):
+        """
+        从连接池获取连接执行查询，自动归还
+        
+        这是修复连接池争夺的关键方法：
+        每次查询都是  acquire→execute→release 原子操作，不会长时间占用连接
+        """
+        client = self.pool.acquire(timeout=5.0)
+        if client is None:
+            logger.error(f"[{self.pool_name}] 连接池耗尽，查询失败")
+            return []
+        try:
+            return client.execute(query, params or {})
+        except Exception as e:
+            logger.error(f"[{self.pool_name}] 执行查询失败: {e}")
+            return []
+        finally:
+            self.pool.release(client)
 
     def ensure_database(self):
         """确保数据库和表存在"""

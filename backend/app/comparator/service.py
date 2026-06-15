@@ -10,6 +10,7 @@ from ..core.config import config
 from ..core.messages import CrossLibraryComparisonResult, AlertMessage
 from ..core.queue_manager import queue_manager, AsyncQueueWrapper
 from ..batch_writer.service import BatchWriterService
+from ..database import ClickHouseManager, get_connection_pool
 from .cross_library_data import (
     load_csv_data,
     compute_percentile_rank,
@@ -34,6 +35,9 @@ class CrossLibraryComparatorService:
     跨馆藏比较服务
     每日凌晨2点运行，与其他图书馆数据进行比较，
     计算百分位数并触发环境异常预警
+
+    修复：使用独立的ClickHouse连接池（"comparator"，最大2连接）
+    避免凌晨与老化预测任务争夺主连接池，导致部分写入失败
     """
 
     METRIC_COLUMN_MAP = {
@@ -68,6 +72,29 @@ class CrossLibraryComparatorService:
         self._task: Optional[asyncio.Task] = None
         self._stats = ComparatorStats()
         self._csv_data: List[Dict[str, Any]] = []
+
+        self._db_pool = get_connection_pool("comparator", max_connections=2)
+        self._comparator_db_manager: Optional[ClickHouseManager] = None
+        self._init_comparator_db()
+
+    def _init_comparator_db(self):
+        """
+        初始化跨馆藏比对专用的数据库管理器
+        使用独立连接池（最大2连接），不与主业务争用
+        """
+        try:
+            self._comparator_db_manager = ClickHouseManager(
+                pool_name="comparator",
+                pool_size=2
+            )
+            logger.info("跨馆藏比对服务初始化独立连接池(comparator, 最大2连接)成功")
+        except Exception as e:
+            logger.warning(f"跨馆藏比对服务独立连接池初始化失败，降级使用主连接池: {e}")
+            self._comparator_db_manager = None
+
+    def get_pool_stats(self) -> Dict[str, Any]:
+        """获取比对服务连接池统计"""
+        return self._db_pool.get_stats()
 
     def register_output_queue(self, queue: AsyncQueueWrapper):
         """注册输出队列，用于发送比较结果"""
@@ -218,10 +245,13 @@ class CrossLibraryComparatorService:
         return alert
 
     def _save_to_database(self, result: CrossLibraryComparisonResult):
-        """保存比较结果到数据库"""
-        if not self._batch_writer:
-            return
-
+        """
+        保存比较结果到数据库（使用比对服务独立连接池）
+        
+        修复：凌晨2点运行时不与老化预测争用主连接池
+        - 优先使用comparator独立池（最大2连接）
+        - 若独立池初始化失败，降级使用batch_writer
+        """
         record = {
             "timestamp": result.timestamp,
             "record_date": result.record_date,
@@ -235,7 +265,30 @@ class CrossLibraryComparatorService:
             "data_source": result.data_source,
         }
 
-        self._batch_writer.writer.add("comparison_data", record)
+        if self._comparator_db_manager is not None:
+            try:
+                columns = list(record.keys())
+                placeholders = ", ".join(["%s"] * len(columns))
+                col_names = ", ".join(columns)
+                values_tuple = tuple(record[col] for col in columns)
+
+                client = self._db_pool.acquire(timeout=3.0)
+                if client:
+                    try:
+                        query = f"INSERT INTO comparison_data ({col_names}) VALUES"
+                        client.execute(query, [values_tuple])
+                    finally:
+                        self._db_pool.release(client)
+                else:
+                    logger.warning("[comparator] 连接池获取超时，使用batch_writer写入")
+                    if self._batch_writer:
+                        self._batch_writer.writer.add("comparison_data", record)
+                return
+            except Exception as e:
+                logger.warning(f"[comparator] 独立池写入失败，降级到batch_writer: {e}")
+
+        if self._batch_writer:
+            self._batch_writer.writer.add("comparison_data", record)
 
     async def _should_run_now(self) -> bool:
         """检查是否应该在当前时间运行"""

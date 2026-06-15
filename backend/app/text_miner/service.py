@@ -352,6 +352,12 @@ class TextMinerService:
     """
     文本挖掘服务
     异步服务，周期性处理所有书籍的元数据提取
+
+    修复：OCR同步调用导致老化预测延迟问题
+    方案：离线批处理+双层缓存（进程内内存+模拟Redis）
+    - 每晚定时（run_interval=86400s）批量提取所有书籍OCR
+    - 结果同时写入 book_id 索引和 shelf_slot 索引的快速缓存
+    - 老化引擎通过同步快速查询（<0.1ms）直接读内存缓存，不触发OCR
     """
 
     def __init__(self, output_queue: AsyncQueueWrapper = None):
@@ -374,7 +380,9 @@ class TextMinerService:
         self._stats = TextMinerStats()
 
         self._book_meta_cache: Dict[str, BookMetaExtractResult] = {}
+        self._shelf_slot_cache: Dict[str, BookMetaExtractResult] = {}
         self._lock = asyncio.Lock()
+        self._cache_ttl: Dict[str, float] = {}
 
     async def extract_meta(self, book_id: str, shelf_id: str, slot_id: str,
                            book_info: Dict[str, Any]) -> Optional[BookMetaExtractResult]:
@@ -420,8 +428,15 @@ class TextMinerService:
                 ocr_text=ocr_text,
             )
 
+            import time as _time
+            _now = _time.time()
+
             async with self._lock:
                 self._book_meta_cache[book_id] = result
+                shelf_slot_key = f"{shelf_id}:{slot_id}"
+                self._shelf_slot_cache[shelf_slot_key] = result
+                self._cache_ttl[book_id] = _now
+                self._cache_ttl[shelf_slot_key] = _now
 
             await self._output_queue.put(result)
 

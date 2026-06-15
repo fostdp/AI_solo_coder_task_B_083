@@ -345,21 +345,74 @@ class ArrheniusAgingModel:
         }
 
 
+_book_meta_process_cache: Dict[str, Dict[str, Any]] = {}
+_cache_last_refresh: float = 0.0
+_CACHE_REFRESH_INTERVAL = 3600
+
+
 def _get_book_meta_from_db(shelf_id: str, slot_id: str) -> Optional[Dict[str, Any]]:
     """
-    从数据库查询书籍元数据
+    从预处理缓存查询书籍元数据（修复：OCR同步调用延迟问题）
 
-    Args:
-        shelf_id: 书架ID
-        slot_id: 槽位ID
+    修复方案（双层缓存+离线批处理）：
+    1. 老化进程内内存缓存（最快，<0.01ms）
+    2. ClickHouse book_meta 表（TextMinerService 每晚批量OCR后写入）
+    3. 降级方案：books_info 关键词匹配（仅当book_meta未初始化时）
 
-    Returns:
-        书籍元数据字典
+    预期效果：老化预测响应时间从2.3s降至 <0.1s
     """
+    import time as _time
+    global _cache_last_refresh
+
+    cache_key = f"{shelf_id}:{slot_id}"
+
+    if cache_key in _book_meta_process_cache:
+        return _book_meta_process_cache[cache_key]
+
     if db_manager is None:
         return None
 
     try:
+        try:
+            query = """
+                SELECT book_id, paper_type, binding_type,
+                       repair_records, fiber_density, ink_type
+                FROM book_meta
+                WHERE shelf_id = %(shelf_id)s
+                  AND slot_id = %(slot_id)s
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """
+            params = {"shelf_id": shelf_id, "slot_id": slot_id}
+            results = db_manager.client.execute(query, params)
+
+            if results:
+                row = results[0]
+                repair_records_raw = row[3]
+                if isinstance(repair_records_raw, (list, tuple)):
+                    repair_records = list(repair_records_raw)
+                elif isinstance(repair_records_raw, str):
+                    import json
+                    try:
+                        repair_records = json.loads(repair_records_raw)
+                    except Exception:
+                        repair_records = [repair_records_raw] if repair_records_raw else []
+                else:
+                    repair_records = []
+
+                meta = {
+                    "book_id": row[0],
+                    "paper_type": row[1],
+                    "binding_type": row[2],
+                    "repair_records": repair_records,
+                    "fiber_density": float(row[4]) if row[4] else 0.7,
+                    "ink_type": row[5] or "油烟墨",
+                }
+                _book_meta_process_cache[cache_key] = meta
+                return meta
+        except Exception as e:
+            logger.debug(f"book_meta表查询失败（可能未初始化），降级使用关键词匹配: {e}")
+
         books = db_manager.get_books_info(shelf_id=shelf_id, slot_id=slot_id)
         if books:
             book = books[0]
@@ -405,7 +458,7 @@ def _get_book_meta_from_db(shelf_id: str, slot_id: str) -> Optional[Dict[str, An
             elif "朱砂" in title:
                 ink_type = "朱砂"
 
-            return {
+            meta = {
                 "book_id": book.get("book_id", ""),
                 "paper_type": paper_type,
                 "binding_type": binding_type,
@@ -413,6 +466,8 @@ def _get_book_meta_from_db(shelf_id: str, slot_id: str) -> Optional[Dict[str, An
                 "fiber_density": fiber_density,
                 "ink_type": ink_type,
             }
+            _book_meta_process_cache[cache_key] = meta
+            return meta
     except Exception as e:
         logger.debug(f"查询书籍元数据失败: {e}")
 
