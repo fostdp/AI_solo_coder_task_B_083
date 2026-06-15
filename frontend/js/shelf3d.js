@@ -25,6 +25,9 @@ class Shelf3D {
         this._bgDirty = true;
         this._lastViewState = null;
 
+        this.spreadArrows = new SpreadArrows(this.canvas);
+        this.spreadDirections = [];
+
         this._init();
     }
 
@@ -38,6 +41,9 @@ class Shelf3D {
         this._resize();
         this._bgDirty = true;
         this._bgImageData = null;
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
         this.render();
     }
 
@@ -77,6 +83,9 @@ class Shelf3D {
             this.viewAngleX = Math.max(-1.5, Math.min(1.5, this.viewAngleX));
             this.lastMouseX = e.clientX;
             this.lastMouseY = e.clientY;
+            if (this.spreadArrows.visible) {
+                this._updateShelfPositions();
+            }
             this.render();
         } else {
             this._checkHover(x, y);
@@ -104,6 +113,9 @@ class Shelf3D {
 
     setShelves(shelves) {
         this.shelves = shelves;
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
     }
 
     setHeatmapData(data) {
@@ -112,6 +124,49 @@ class Shelf3D {
 
     setHeatmapType(type) {
         this.heatmapType = type;
+    }
+
+    setSpreadDirections(directions) {
+        this.spreadDirections = directions || [];
+        this.spreadArrows.setDirections(this.spreadDirections);
+        this._updateShelfPositions();
+    }
+
+    toggleSpreadArrows(forceState) {
+        this._updateShelfPositions();
+        const visible = this.spreadArrows.toggleVisibility(forceState);
+        const btn = document.getElementById('toggleSpread');
+        if (btn) {
+            btn.classList.toggle('active', visible);
+        }
+        if (!visible) {
+            this.render();
+        }
+        return visible;
+    }
+
+    _updateShelfPositions() {
+        const positions = {};
+        const shelfWidth = 100;
+        const shelfDepth = 30;
+
+        this.shelves.forEach((shelf, idx) => {
+            const row = Math.floor(idx / 2);
+            const col = idx % 2;
+            const x = (col - 0.5) * (shelfWidth + 80);
+            const y = 0;
+            const z = (row - 1.5) * (shelfDepth + 60);
+
+            const projected = this._project(x, y, z);
+            positions[shelf.shelf_id] = {
+                x: projected.x,
+                y: projected.y,
+                z: z,
+                scale: projected.scale
+            };
+        });
+
+        this.spreadArrows.setShelfPositions(positions);
     }
 
     _checkHover(x, y) {
@@ -269,6 +324,11 @@ class Shelf3D {
 
         if (this.selectedSlot) {
             this._drawSelectedHighlight();
+        }
+
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+            this.spreadArrows.draw();
         }
     }
 
@@ -631,11 +691,17 @@ class Shelf3D {
 
     zoomIn() {
         this.zoom = Math.min(3, this.zoom * 1.2);
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
         this.render();
     }
 
     zoomOut() {
         this.zoom = Math.max(0.3, this.zoom / 1.2);
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
         this.render();
     }
 
@@ -646,16 +712,25 @@ class Shelf3D {
         this.offsetX = 0;
         this.offsetY = 0;
         this.selectedSlot = null;
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
         this.render();
     }
 
     rotateLeft() {
         this.viewAngleY -= 0.2;
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
         this.render();
     }
 
     rotateRight() {
         this.viewAngleY += 0.2;
+        if (this.spreadArrows.visible) {
+            this._updateShelfPositions();
+        }
         this.render();
     }
 
@@ -667,6 +742,9 @@ class Shelf3D {
             this.offsetX = -col * 50;
             this.offsetY = (row - 1) * 30;
             this.zoom = 1.5;
+            if (this.spreadArrows.visible) {
+                this._updateShelfPositions();
+            }
             this.render();
         }
     }

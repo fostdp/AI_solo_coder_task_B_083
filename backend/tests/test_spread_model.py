@@ -532,14 +532,24 @@ class TestSimulateSpreadBoundary:
     def test_isolated_shelf_no_spread(self):
         """边界场景：图无邻接边时传播停止"""
         layout = {"total_shelves": 3, "columns": 10, "layers": 1}
-        graph = ShelfGraph(layout, self.edge_params)
+        no_edge_params = {
+            "distance_factor": 0.01,
+            "ventilation_factor": 0.7,
+            "adjacency_bonus": 1.5,
+            "ventilation_default": 0.5,
+            "shelf_distance_default": 3.0,
+        }
+        graph = ShelfGraph(layout, no_edge_params)
+
+        for shelf_id in graph.nodes:
+            assert len(graph.get_neighbors(shelf_id)) == 0, f"{shelf_id} 应无邻居"
 
         results = simulate_spread(
             graph=graph,
             initial_infected=["SHELF-02"],
             days=20,
             seir_params=self.seir_params,
-            edge_params=self.edge_params,
+            edge_params=no_edge_params,
         )
 
         day20 = [r for r in results if r.day == 20]

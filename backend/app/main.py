@@ -37,7 +37,37 @@ from .efficacy_engine import EfficacyEngineService
 from .comparator import CrossLibraryComparatorService
 from .spread_model import SpreadModelService
 
+try:
+    from services.comparator_service.ipc_client import (
+        ComparatorServiceClient,
+        init_comparator_client,
+        get_comparator_client,
+    )
+    _COMPARATOR_CLIENT_AVAILABLE = True
+except ImportError:
+    try:
+        import sys
+        from pathlib import Path
+        BASE_DIR = Path(__file__).resolve().parent.parent.parent
+        sys.path.insert(0, str(BASE_DIR / "services" / "comparator-service"))
+        from ipc_client import (
+            ComparatorServiceClient,
+            init_comparator_client,
+            get_comparator_client,
+        )
+        _COMPARATOR_CLIENT_AVAILABLE = True
+    except ImportError:
+        _COMPARATOR_CLIENT_AVAILABLE = False
+        ComparatorServiceClient = None
+        init_comparator_client = None
+        get_comparator_client = None
+
 setup_loguru_logging(config)
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "services", "efficacy-service"))
+from router import router as efficacy_router
 
 
 class SystemServices:
@@ -52,6 +82,7 @@ class SystemServices:
         self.text_miner: Optional[TextMinerService] = None
         self.efficacy_engine: Optional[EfficacyEngineService] = None
         self.comparator: Optional[CrossLibraryComparatorService] = None
+        self.comparator_client: Optional[ComparatorServiceClient] = None
         self.spread_model: Optional[SpreadModelService] = None
         self.clickhouse_client: Optional[Client] = None
 
@@ -80,7 +111,22 @@ class SystemServices:
         self.alerter = AlerterService()
         self.text_miner = TextMinerService()
         self.efficacy_engine = EfficacyEngineService()
-        self.comparator = CrossLibraryComparatorService(batch_writer_service=self.batch_writer)
+        comp_config = config.comparator
+        use_external = comp_config.get("use_external_service", False)
+        external_url = comp_config.get("external_service_url", "http://127.0.0.1:8001")
+
+        if _COMPARATOR_CLIENT_AVAILABLE:
+            try:
+                self.comparator_client = init_comparator_client(base_url=external_url)
+                logger.info(f"Comparator Service 客户端已初始化: {external_url}")
+            except Exception as e:
+                logger.warning(f"Comparator Service 客户端初始化失败: {e}")
+                self.comparator_client = None
+
+        self.comparator = CrossLibraryComparatorService(
+            batch_writer_service=self.batch_writer,
+            use_external_service=use_external,
+        )
         self.spread_model = SpreadModelService(batch_writer_service=self.batch_writer)
 
         await self._connect_queues()
@@ -255,6 +301,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(efficacy_router, prefix="/api/efficacy", tags=["efficacy"])
 
 
 @app.middleware("http")
@@ -576,3 +624,118 @@ async def get_spread_directions():
     if services.spread_model._shelf_graph:
         graph_data = services.spread_model._shelf_graph.to_dict()
     return {"directions": directions, "graph": graph_data}
+
+
+@app.post("/api/comparator/callback")
+async def comparator_result_callback(request: Dict[str, Any]):
+    """
+    接收外部 comparator-service 的比对结果回调
+    """
+    try:
+        from .core.messages import CrossLibraryComparisonResult, deserialize_message
+
+        result = deserialize_message(request)
+        if isinstance(result, CrossLibraryComparisonResult):
+            if services.comparator and services.comparator._output_queue:
+                await services.comparator._output_queue.put(result)
+
+            if services.comparator and services.comparator._batch_writer:
+                services.comparator._save_to_database(result)
+
+            logger.info(f"收到外部比对结果: {result.library_name} - {result.metric}")
+            return {"success": True}
+        else:
+            logger.warning(f"收到无效的比对结果回调: {request}")
+            return {"success": False, "error": "无效的消息类型"}
+    except Exception as e:
+        logger.error(f"处理比对结果回调失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/alert/callback")
+async def comparator_alert_callback(request: Dict[str, Any]):
+    """
+    接收外部 comparator-service 的告警回调
+    """
+    try:
+        from .core.messages import AlertMessage, deserialize_message
+
+        alert = deserialize_message(request)
+        if isinstance(alert, AlertMessage):
+            if services.alerter and services.alerter._input_queue:
+                await services.alerter._input_queue.put(alert)
+
+            logger.warning(
+                f"收到外部告警: {alert.alert_type} - "
+                f"{alert.alert_level} - {alert.message[:50]}"
+            )
+            return {"success": True}
+        else:
+            logger.warning(f"收到无效的告警回调: {request}")
+            return {"success": False, "error": "无效的消息类型"}
+    except Exception as e:
+        logger.error(f"处理告警回调失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/comparator/service/health")
+async def check_external_comparator_service():
+    """检查外部 comparator-service 健康状态"""
+    if services.comparator_client:
+        health = services.comparator_client.check_health()
+        return {
+            "client_available": True,
+            "service_health": health,
+            "service_url": services.comparator_client.base_url,
+        }
+    else:
+        return {
+            "client_available": False,
+            "error": "Comparator Service 客户端未初始化",
+            "client_import_available": _COMPARATOR_CLIENT_AVAILABLE,
+        }
+
+
+@app.post("/api/comparator/service/switch")
+async def switch_comparator_service(request: Dict[str, Any]):
+    """
+    动态切换 comparator 服务模式
+    request: {"use_external": true/false}
+    """
+    try:
+        use_external = request.get("use_external", False)
+
+        if use_external and not _COMPARATOR_CLIENT_AVAILABLE:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "外部服务客户端不可用"}
+            )
+
+        if use_external and services.comparator_client is None:
+            comp_config = config.comparator
+            external_url = comp_config.get("external_service_url", "http://127.0.0.1:8001")
+            services.comparator_client = init_comparator_client(base_url=external_url)
+
+        await services.comparator.stop()
+
+        services.comparator = CrossLibraryComparatorService(
+            batch_writer_service=services.batch_writer,
+            use_external_service=use_external,
+        )
+
+        services.comparator.register_alert_queue(services.alerter._input_queue)
+
+        await services.comparator.start()
+
+        logger.info(f"已切换 comparator 服务模式: {'外部' if use_external else '内部'}")
+        return {
+            "success": True,
+            "use_external": use_external,
+            "service_mode": "external" if use_external else "internal",
+        }
+    except Exception as e:
+        logger.error(f"切换 comparator 服务模式失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )

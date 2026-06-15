@@ -210,10 +210,11 @@ class SEIRModel:
         I = state.I
         R = state.R
 
-        effective_beta = self.beta * (I + infection_pressure)
+        effective_infection = I + infection_pressure
+        new_infections = self.beta * S * effective_infection
 
-        new_S = S - effective_beta * S * I + self.mu * (1 - S)
-        new_E = E + effective_beta * S * I - (self.sigma + self.mu) * E
+        new_S = S - new_infections + self.mu * (1 - S)
+        new_E = E + new_infections - (self.sigma + self.mu) * E
         new_I = I + self.sigma * E - (self.gamma + self.mu) * I
         new_R = R + self.gamma * I - self.mu * R
 

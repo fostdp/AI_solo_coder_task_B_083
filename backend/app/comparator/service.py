@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -16,6 +17,36 @@ from .cross_library_data import (
     compute_percentile_rank,
     generate_mock_csv,
 )
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+SERVICES_DIR = BASE_DIR / "services"
+if str(SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVICES_DIR))
+
+try:
+    from comparator_service.ipc_client import (
+        ComparatorServiceClient,
+        ComparatorServiceIPCWrapper,
+        init_comparator_client,
+        get_comparator_client,
+    )
+    _EXTERNAL_CLIENT_AVAILABLE = True
+except ImportError:
+    try:
+        sys.path.insert(0, str(SERVICES_DIR / "comparator-service"))
+        from ipc_client import (
+            ComparatorServiceClient,
+            ComparatorServiceIPCWrapper,
+            init_comparator_client,
+            get_comparator_client,
+        )
+        _EXTERNAL_CLIENT_AVAILABLE = True
+    except ImportError:
+        _EXTERNAL_CLIENT_AVAILABLE = False
+        ComparatorServiceClient = None
+        ComparatorServiceIPCWrapper = None
+        init_comparator_client = None
+        get_comparator_client = None
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +85,11 @@ class CrossLibraryComparatorService:
         "mold_spore": "霉菌孢子",
     }
 
-    def __init__(self, batch_writer_service: BatchWriterService = None):
+    def __init__(
+        self,
+        batch_writer_service: BatchWriterService = None,
+        use_external_service: bool = None,
+    ):
         comp_config = config.comparator
 
         self._run_interval = comp_config.get("run_interval", 86400)
@@ -63,6 +98,21 @@ class CrossLibraryComparatorService:
         self._csv_data_path = comp_config.get("csv_data_path", "data/cross_library_comparison.csv")
         self._libraries = comp_config.get("libraries", [])
         self._metrics = comp_config.get("metrics", ["temperature", "humidity", "ph", "mold_spore"])
+
+        if use_external_service is None:
+            use_external_service = comp_config.get("use_external_service", False)
+        self._use_external_service = use_external_service and _EXTERNAL_CLIENT_AVAILABLE
+
+        self._external_wrapper: Optional[ComparatorServiceIPCWrapper] = None
+        if self._use_external_service:
+            external_url = comp_config.get("external_service_url", "http://127.0.0.1:8001")
+            try:
+                client = ComparatorServiceClient(base_url=external_url)
+                self._external_wrapper = ComparatorServiceIPCWrapper(client)
+                logger.info(f"已启用外部 comparator-service: {external_url}")
+            except Exception as e:
+                logger.warning(f"外部 comparator-service 初始化失败，降级使用内部服务: {e}")
+                self._use_external_service = False
 
         self._output_queue: Optional[AsyncQueueWrapper] = None
         self._alert_queue: Optional[AsyncQueueWrapper] = None
@@ -73,9 +123,13 @@ class CrossLibraryComparatorService:
         self._stats = ComparatorStats()
         self._csv_data: List[Dict[str, Any]] = []
 
-        self._db_pool = get_connection_pool("comparator", max_connections=2)
-        self._comparator_db_manager: Optional[ClickHouseManager] = None
-        self._init_comparator_db()
+        if not self._use_external_service:
+            self._db_pool = get_connection_pool("comparator", max_connections=2)
+            self._comparator_db_manager: Optional[ClickHouseManager] = None
+            self._init_comparator_db()
+        else:
+            self._db_pool = None
+            self._comparator_db_manager = None
 
     def _init_comparator_db(self):
         """
@@ -94,7 +148,11 @@ class CrossLibraryComparatorService:
 
     def get_pool_stats(self) -> Dict[str, Any]:
         """获取比对服务连接池统计"""
-        return self._db_pool.get_stats()
+        if self._use_external_service and self._external_wrapper:
+            return self._external_wrapper.get_pool_stats()
+        if self._db_pool:
+            return self._db_pool.get_stats()
+        return {"name": "comparator", "status": "external_service"}
 
     def register_output_queue(self, queue: AsyncQueueWrapper):
         """注册输出队列，用于发送比较结果"""
@@ -162,6 +220,33 @@ class CrossLibraryComparatorService:
         执行所有图书馆、所有指标的比较
         返回比较结果列表
         """
+        if self._use_external_service and self._external_wrapper:
+            external_results = await self._external_wrapper.compare_all()
+            results = []
+            for r in external_results:
+                try:
+                    result = CrossLibraryComparisonResult(
+                        message_id=r.get("message_id", ""),
+                        timestamp=r.get("timestamp", datetime.now().isoformat()),
+                        record_date=r.get("record_date", ""),
+                        library_name=r.get("library_name", ""),
+                        metric=r.get("metric", ""),
+                        value=float(r.get("value", 0.0)),
+                        percentile=float(r.get("percentile", 0.0)),
+                        percentile_rank=int(r.get("percentile_rank", 0)),
+                        total_libraries=int(r.get("total_libraries", 0)),
+                        is_anomaly=bool(r.get("is_anomaly", False)),
+                        data_source=r.get("data_source", "external"),
+                    )
+                    results.append(result)
+                    if self._output_queue:
+                        await self._output_queue.put(result)
+                except Exception as e:
+                    logger.warning(f"解析外部比对结果失败: {r}, error={e}")
+            self._stats.total_comparisons += len(results)
+            self._stats.last_run_time = datetime.now().isoformat()
+            return results
+
         if not self._csv_data:
             self.load_csv_data()
 
@@ -337,13 +422,24 @@ class CrossLibraryComparatorService:
         if self._running:
             return
 
+        if self._use_external_service and self._external_wrapper:
+            await self._external_wrapper.start()
+            self._running = True
+            logger.info("CrossLibraryComparatorService已启动（外部服务模式）")
+            return
+
         self._running = True
         self._task = asyncio.create_task(self._main_loop())
-        logger.info("CrossLibraryComparatorService已启动")
+        logger.info("CrossLibraryComparatorService已启动（内部服务模式）")
 
     async def stop(self):
         """停止服务"""
         self._running = False
+
+        if self._use_external_service and self._external_wrapper:
+            await self._external_wrapper.stop()
+            logger.info("CrossLibraryComparatorService已停止（外部服务模式）")
+            return
 
         if self._task:
             self._task.cancel()
@@ -354,10 +450,21 @@ class CrossLibraryComparatorService:
 
         self._task = None
         await queue_manager.flush_all_async()
-        logger.info("CrossLibraryComparatorService已停止")
+        logger.info("CrossLibraryComparatorService已停止（内部服务模式）")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
+        if self._use_external_service and self._external_wrapper:
+            external_stats = self._external_wrapper.get_stats()
+            return {
+                **external_stats,
+                "service_mode": "external",
+                "use_external_service": True,
+                "internal_stats": self._stats.__dict__,
+                "output_queue_size": self._output_queue.qsize() if self._output_queue else 0,
+                "alert_queue_size": self._alert_queue.qsize() if self._alert_queue else 0,
+            }
+
         return {
             "stats": self._stats.__dict__,
             "config": {
@@ -368,6 +475,8 @@ class CrossLibraryComparatorService:
                 "libraries": self._libraries,
                 "metrics": self._metrics,
             },
+            "service_mode": "internal",
+            "use_external_service": False,
             "output_queue_size": self._output_queue.qsize() if self._output_queue else 0,
             "alert_queue_size": self._alert_queue.qsize() if self._alert_queue else 0,
         }

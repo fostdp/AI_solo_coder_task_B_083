@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package spreadsimulator;
+
+option go_package = "github.com/guji/spread-simulator/proto;spreadsimulator";
+
+message ShelfNode {
+  string shelf_id = 1;
+  int32 row = 2;
+  int32 col = 3;
+  int32 layer = 4;
+  double ventilation = 5;
+  repeated int32 position = 6;
+}
+
+message Edge {
+  string from_shelf = 1;
+  string to_shelf = 2;
+  double weight = 3;
+  double distance = 4;
+  double ventilation = 5;
+}
+
+message SEIRParams {
+  double beta = 1;
+  double sigma = 2;
+  double gamma = 3;
+  double mu = 4;
+}
+
+message EdgeWeightParams {
+  double distance_factor = 1;
+  double ventilation_factor = 2;
+  double adjacency_bonus = 3;
+  double ventilation_default = 4;
+  double shelf_distance_default = 5;
+}
+
+message ShelvesLayout {
+  int32 total_shelves = 1;
+  int32 columns = 2;
+  int32 layers = 3;
+}
+
+message SimulationRequest {
+  ShelvesLayout shelves_layout = 1;
+  repeated string initial_infected = 2;
+  int32 days = 3;
+  SEIRParams seir_params = 4;
+  EdgeWeightParams edge_params = 5;
+}
+
+message SEIRState {
+  double S = 1;
+  double E = 2;
+  double I = 3;
+  double R = 4;
+  double infection_prob = 5;
+}
+
+message SimulationResult {
+  int32 day = 1;
+  string shelf_id = 2;
+  SEIRState state = 3;
+  string spread_from = 4;
+  double edge_weight = 5;
+}
+
+message Hotspot {
+  string shelf_id = 1;
+  double max_infection_prob = 2;
+  int32 first_day = 3;
+  bool is_hotspot = 4;
+}
+
+message Direction {
+  string from_shelf = 1;
+  string to_shelf = 2;
+  double weight = 3;
+}
+
+message SimulationResponse {
+  repeated SimulationResult results = 1;
+  repeated Hotspot hotspots = 2;
+  repeated Direction directions = 3;
+}
+
+service SpreadSimulator {
+  rpc SimulateSpread(SimulationRequest) returns (SimulationResponse);
+}

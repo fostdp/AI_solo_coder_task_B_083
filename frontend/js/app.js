@@ -2,6 +2,7 @@ const API_BASE = 'http://localhost:8000';
 
 let shelf3d;
 let heatmapManager;
+let rankWidget;
 let currentShelfId = null;
 let currentSlotId = null;
 
@@ -12,6 +13,7 @@ document.addEventListener('DOMContentLoaded', function() {
 function init() {
     shelf3d = new Shelf3D('shelfCanvas');
     heatmapManager = new HeatmapManager();
+    rankWidget = new RankWidget('comparatorPanel');
 
     shelf3d.onSlotClick = (slot) => {
         loadSlotDetail(slot.shelfId, slot.slotId);
@@ -719,30 +721,70 @@ async function loadComparatorStats() {
 }
 
 function renderComparatorPanel(data) {
-    const container = document.getElementById('comparatorPanel');
-    if (!container) return;
+    const rankData = data.rankings || data.stats?.rankings || [];
+    rankWidget.setData(rankData);
 
-    const stats = data.stats || {};
-    let html = '<h4>跨馆藏环境比对</h4>';
-    html += '<div class="comparator-info">';
-    html += `<div class="comp-stat">总比对次数: ${stats.total_comparisons || 0}</div>`;
-    html += `<div class="comp-stat">异常次数: ${stats.total_anomalies || 0}</div>`;
-    html += `<div class="comp-stat">最近运行: ${stats.last_run_time || '待运行'}</div>`;
-    html += '</div>';
-    container.innerHTML = html;
+    const hasAnomaly = rankData.some(item => item.is_anomaly || item.percentile > 95);
+    if (hasAnomaly) {
+        rankWidget.highlightAnomaly();
+    }
 }
 
 function renderMockComparatorPanel() {
-    const container = document.getElementById('comparatorPanel');
-    if (!container) return;
-
-    let html = '<h4>跨馆藏环境比对</h4>';
-    html += '<div class="comparator-info">';
-    html += '<div class="comp-stat">总比对次数: 0</div>';
-    html += '<div class="comp-stat">异常次数: 0</div>';
-    html += '<div class="comp-stat">最近运行: 待运行</div>';
-    html += '</div>';
-    container.innerHTML = html;
+    const mockRankings = [
+        {
+            library_name: '故宫博物院图书馆',
+            percentile: 72.5,
+            is_anomaly: false,
+            metrics: {
+                temperature: 21.2,
+                humidity: 52,
+                ph: 6.8,
+                mold_spore: 150
+            },
+            metric_percentiles: {
+                temperature: 65,
+                humidity: 70,
+                ph: 75,
+                mold_spore: 80
+            }
+        },
+        {
+            library_name: '国家图书馆古籍馆',
+            percentile: 88.3,
+            is_anomaly: false,
+            metrics: {
+                temperature: 23.5,
+                humidity: 58,
+                ph: 6.2,
+                mold_spore: 280
+            },
+            metric_percentiles: {
+                temperature: 85,
+                humidity: 82,
+                ph: 90,
+                mold_spore: 86
+            }
+        },
+        {
+            library_name: '上海图书馆善本室',
+            percentile: 96.1,
+            is_anomaly: true,
+            metrics: {
+                temperature: 25.8,
+                humidity: 65,
+                ph: 5.6,
+                mold_spore: 520
+            },
+            metric_percentiles: {
+                temperature: 92,
+                humidity: 94,
+                ph: 97,
+                mold_spore: 98
+            }
+        }
+    ];
+    rankWidget.setData(mockRankings);
 }
 
 async function evaluateEfficacy(prescription) {
@@ -807,14 +849,18 @@ function renderSpreadHotspots(hotspots) {
     if (!container) return;
 
     let html = '<h4>传播热点预测</h4>';
-    if (hotspots.length === 0) {
-        html += '<div class="empty-tip">暂无热点数据</div>';
+
+    if (!hotspots || hotspots.length === 0) {
+        html += '<div class="empty-tip">';
+        html += '<button class="ctrl-btn" onclick="runSpreadPrediction()">运行传播预测</button>';
+        html += '</div>';
     } else {
         html += '<div class="hotspot-list">';
         hotspots.forEach(h => {
             const prob = ((h.max_infection_prob || 0) * 100).toFixed(1);
             const firstDay = h.first_day || '-';
-            html += `<div class="hotspot-item">
+            const riskClass = prob >= 80 ? 'hotspot-high' : prob >= 50 ? 'hotspot-medium' : 'hotspot-low';
+            html += `<div class="hotspot-item ${riskClass}">
                 <span class="hotspot-id">${h.shelf_id}</span>
                 <span class="hotspot-prob">感染概率: ${prob}%</span>
                 <span class="hotspot-day">首日: 第${firstDay}天</span>
@@ -822,5 +868,6 @@ function renderSpreadHotspots(hotspots) {
         });
         html += '</div>';
     }
+
     container.innerHTML = html;
 }

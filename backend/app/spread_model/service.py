@@ -5,7 +5,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
@@ -24,6 +24,9 @@ from .seir import (
     identify_hotspots,
     SimulationResult,
 )
+
+if TYPE_CHECKING:
+    from ..workers.spread_worker import SpreadSimulationWorker, AveragedResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,10 @@ class SpreadModelService:
         self._hotspot_threshold = spread_config.get("hotspot_threshold", 0.5)
         self._edge_params["ventilation_default"] = spread_config.get("ventilation_default", 0.5)
         self._edge_params["shelf_distance_default"] = spread_config.get("shelf_distance_default", 1.0)
+
+        self._monte_carlo_simulations = spread_config.get("monte_carlo_simulations", 100)
+        self._max_workers = spread_config.get("max_workers", None)
+        self._spread_worker: Optional[SpreadSimulationWorker] = None
 
     def set_batch_writer_service(self, service: BatchWriterService):
         """设置批量写入服务"""
@@ -185,7 +192,9 @@ class SpreadModelService:
 
     async def predict_spread(
         self,
-        initial_infected: List[str]
+        initial_infected: List[str],
+        use_process_pool: bool = False,
+        num_simulations: Optional[int] = None,
     ) -> List[SpreadPredictionResult]:
         """
         预测传播，生成SpreadPredictionResult消息
@@ -193,6 +202,8 @@ class SpreadModelService:
 
         参数:
             initial_infected: 初始感染书架ID列表
+            use_process_pool: 是否使用 ProcessPoolExecutor 进行蒙特卡洛模拟，默认 False
+            num_simulations: 蒙特卡洛模拟次数，默认使用配置值（100）
 
         返回:
             SpreadPredictionResult消息列表
@@ -200,58 +211,207 @@ class SpreadModelService:
         if self._shelf_graph is None:
             self.build_shelf_graph()
 
-        logger.info(f"开始传播预测: 初始感染书架={initial_infected}")
+        logger.info(
+            f"开始传播预测: 初始感染书架={initial_infected}, "
+            f"use_process_pool={use_process_pool}"
+        )
 
         try:
             prediction_date = datetime.now().isoformat()
-            results = simulate_spread(
-                graph=self._shelf_graph,
-                initial_infected=initial_infected,
-                days=self._prediction_days,
-                seir_params=self._seir_params,
-                edge_params=self._edge_params,
-            )
 
-            self._last_simulation_results = results
-
-            hotspots = identify_hotspots(results, self._hotspot_threshold)
-            self._hotspots = hotspots
-            self._stats.total_hotspots_identified += len(hotspots)
-
-            hotspot_shelves = {h["shelf_id"]: h for h in hotspots}
-
-            prediction_results: List[SpreadPredictionResult] = []
-            for result in results:
-                is_hotspot = result.shelf_id in hotspot_shelves
-                infection_prob = result.state.infection_prob
-
-                msg = SpreadPredictionResult(
+            if use_process_pool:
+                prediction_results = await self._predict_spread_monte_carlo(
+                    initial_infected=initial_infected,
+                    num_simulations=num_simulations or self._monte_carlo_simulations,
                     prediction_date=prediction_date,
-                    model_type=self._model_type,
-                    day=result.day,
-                    shelf_id=result.shelf_id,
-                    slot_id="",
-                    S=result.state.S,
-                    E=result.state.E,
-                    I=result.state.I,
-                    R=result.state.R,
-                    infection_prob=infection_prob,
-                    is_hotspot=is_hotspot,
-                    spread_from=result.spread_from,
-                    edge_weight=result.edge_weight,
                 )
-                prediction_results.append(msg)
+            else:
+                results = simulate_spread(
+                    graph=self._shelf_graph,
+                    initial_infected=initial_infected,
+                    days=self._prediction_days,
+                    seir_params=self._seir_params,
+                    edge_params=self._edge_params,
+                )
+
+                self._last_simulation_results = results
+
+                hotspots = identify_hotspots(results, self._hotspot_threshold)
+                self._hotspots = hotspots
+                self._stats.total_hotspots_identified += len(hotspots)
+
+                hotspot_shelves = {h["shelf_id"]: h for h in hotspots}
+
+                prediction_results: List[SpreadPredictionResult] = []
+                for result in results:
+                    is_hotspot = result.shelf_id in hotspot_shelves
+                    infection_prob = result.state.infection_prob
+
+                    msg = SpreadPredictionResult(
+                        prediction_date=prediction_date,
+                        model_type=self._model_type,
+                        day=result.day,
+                        shelf_id=result.shelf_id,
+                        slot_id="",
+                        S=result.state.S,
+                        E=result.state.E,
+                        I=result.state.I,
+                        R=result.state.R,
+                        infection_prob=infection_prob,
+                        is_hotspot=is_hotspot,
+                        spread_from=result.spread_from,
+                        edge_weight=result.edge_weight,
+                    )
+                    prediction_results.append(msg)
 
             self._stats.total_simulations += 1
             self._stats.last_simulation_time = datetime.now().isoformat()
 
-            logger.info(f"传播预测完成: {len(prediction_results)} 条结果, {len(hotspots)} 个热点")
+            logger.info(f"传播预测完成: {len(prediction_results)} 条结果, {len(self._hotspots)} 个热点")
             return prediction_results
 
         except Exception as e:
             self._stats.total_errors += 1
             logger.error(f"传播预测失败: {e}")
             raise
+
+    async def _predict_spread_monte_carlo(
+        self,
+        initial_infected: List[str],
+        num_simulations: int,
+        prediction_date: str,
+    ) -> List[SpreadPredictionResult]:
+        """
+        使用蒙特卡洛模拟进行传播预测
+        运行 N 次模拟取平均，降低随机性
+        """
+        from ..workers.spread_worker import SpreadSimulationWorker
+
+        logger.info(
+            f"开始蒙特卡洛传播预测: {num_simulations} 次模拟, "
+            f"max_workers={self._max_workers}"
+        )
+
+        if self._spread_worker is None:
+            self._spread_worker = SpreadSimulationWorker(max_workers=self._max_workers)
+            self._spread_worker.start()
+
+        def _progress_callback(completed: int, total: int):
+            if completed % 10 == 0 or completed == total:
+                logger.debug(f"蒙特卡洛进度: {completed}/{total}")
+
+        loop = asyncio.get_running_loop()
+        averaged_results = await loop.run_in_executor(
+            None,
+            lambda: self._spread_worker.run_monte_carlo_simulation(
+                graph=self._shelf_graph,
+                initial_infected=initial_infected,
+                days=self._prediction_days,
+                seir_params=self._seir_params,
+                edge_params=self._edge_params,
+                num_simulations=num_simulations,
+                progress_callback=_progress_callback,
+            ),
+        )
+
+        simulation_results = self._averaged_to_simulation_results(averaged_results)
+        self._last_simulation_results = simulation_results
+
+        hotspots = self._identify_hotspots_from_averaged(
+            averaged_results, self._hotspot_threshold
+        )
+        self._hotspots = hotspots
+        self._stats.total_hotspots_identified += len(hotspots)
+
+        hotspot_shelves = {h["shelf_id"]: h for h in hotspots}
+
+        prediction_results: List[SpreadPredictionResult] = []
+        for avg_result in averaged_results:
+            is_hotspot = avg_result.shelf_id in hotspot_shelves
+
+            msg = SpreadPredictionResult(
+                prediction_date=prediction_date,
+                model_type=f"{self._model_type}-MC",
+                day=avg_result.day,
+                shelf_id=avg_result.shelf_id,
+                slot_id="",
+                S=avg_result.S_mean,
+                E=avg_result.E_mean,
+                I=avg_result.I_mean,
+                R=avg_result.R_mean,
+                infection_prob=avg_result.infection_prob_mean,
+                is_hotspot=is_hotspot,
+                spread_from=avg_result.spread_from,
+                edge_weight=avg_result.edge_weight,
+            )
+            prediction_results.append(msg)
+
+        logger.info(
+            f"蒙特卡洛传播预测完成: {len(prediction_results)} 条结果, "
+            f"{len(hotspots)} 个热点"
+        )
+
+        return prediction_results
+
+    def _averaged_to_simulation_results(
+        self,
+        averaged_results: List[AveragedResult],
+    ) -> List[SimulationResult]:
+        """将 AveragedResult 转换为 SimulationResult（用于兼容现有接口）"""
+        from .seir import SEIRState
+
+        results = []
+        for avg in averaged_results:
+            state = SEIRState(
+                S=avg.S_mean,
+                E=avg.E_mean,
+                I=avg.I_mean,
+                R=avg.R_mean,
+            )
+            result = SimulationResult(
+                day=avg.day,
+                shelf_id=avg.shelf_id,
+                state=state,
+                spread_from=avg.spread_from,
+                edge_weight=avg.edge_weight,
+            )
+            results.append(result)
+        return results
+
+    def _identify_hotspots_from_averaged(
+        self,
+        averaged_results: List[AveragedResult],
+        threshold: float,
+    ) -> List[Dict[str, Any]]:
+        """从平均结果中识别热点书架"""
+        shelf_max_infection: Dict[str, Dict[str, Any]] = {}
+
+        for avg_result in averaged_results:
+            shelf_id = avg_result.shelf_id
+            infection_prob = avg_result.infection_prob_mean
+
+            if shelf_id not in shelf_max_infection:
+                shelf_max_infection[shelf_id] = {
+                    "shelf_id": shelf_id,
+                    "max_infection_prob": 0.0,
+                    "first_day": None,
+                    "is_hotspot": False,
+                }
+
+            if infection_prob > shelf_max_infection[shelf_id]["max_infection_prob"]:
+                shelf_max_infection[shelf_id]["max_infection_prob"] = infection_prob
+
+            if infection_prob >= threshold and shelf_max_infection[shelf_id]["first_day"] is None:
+                shelf_max_infection[shelf_id]["first_day"] = avg_result.day
+                shelf_max_infection[shelf_id]["is_hotspot"] = True
+
+        hotspots = [
+            info for info in shelf_max_infection.values()
+            if info["is_hotspot"]
+        ]
+
+        hotspots.sort(key=lambda x: x["max_infection_prob"], reverse=True)
+        return hotspots
 
     async def get_hotspots(
         self,
@@ -389,12 +549,16 @@ class SpreadModelService:
                 pass
             self._timer_task = None
 
+        if self._spread_worker:
+            self._spread_worker.shutdown(wait=True)
+            self._spread_worker = None
+
         await queue_manager.flush_all_async()
         logger.info("传播模型服务已停止")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
-        return {
+        stats = {
             "stats": self._stats.__dict__,
             "queues": {
                 "request_queue_size": self._request_queue.qsize(),
@@ -406,4 +570,13 @@ class SpreadModelService:
             },
             "hotspots_count": len(self._hotspots),
             "last_results_count": len(self._last_simulation_results),
+            "monte_carlo_config": {
+                "num_simulations": self._monte_carlo_simulations,
+                "max_workers": self._max_workers,
+            },
         }
+
+        if self._spread_worker:
+            stats["worker"] = self._spread_worker.get_stats()
+
+        return stats
