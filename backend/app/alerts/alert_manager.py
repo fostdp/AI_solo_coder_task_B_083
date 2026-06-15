@@ -9,17 +9,34 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 import uuid
 
+from ..core.config import config
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class AlertThreshold:
-    yellow_ph: float = 6.5
-    orange_ph: float = 6.0
-    red_ph: float = 5.5
-    yellow_mold: float = 500.0
-    orange_light: float = 50.0
-    red_active_mold: bool = True
+    yellow_ph: float = None
+    orange_ph: float = None
+    red_ph: float = None
+    yellow_mold: float = None
+    orange_light: float = None
+    red_active_mold: bool = None
+
+    def __post_init__(self):
+        thresholds = config.get_alert_thresholds()
+        if self.yellow_ph is None:
+            self.yellow_ph = thresholds.get("yellow_ph", 6.5)
+        if self.orange_ph is None:
+            self.orange_ph = thresholds.get("orange_ph", 6.0)
+        if self.red_ph is None:
+            self.red_ph = thresholds.get("red_ph", 5.5)
+        if self.yellow_mold is None:
+            self.yellow_mold = thresholds.get("yellow_mold", 500.0)
+        if self.orange_light is None:
+            self.orange_light = thresholds.get("orange_light", 50.0)
+        if self.red_active_mold is None:
+            self.red_active_mold = thresholds.get("red_active_mold", True)
 
 
 @dataclass
@@ -44,16 +61,20 @@ class AlertManager:
     """
     告警管理器
     负责告警分级、去重、推送
+    所有配置从config.yaml加载
     """
 
     def __init__(self, dingtalk_webhook: str = None,
                  smtp_config: Dict = None,
                  thresholds: AlertThreshold = None):
-        self.dingtalk_webhook = dingtalk_webhook
-        self.smtp_config = smtp_config or {}
+        notif_config = config.notification
+        alert_config = config.alerts
+
+        self.dingtalk_webhook = dingtalk_webhook or notif_config.get("dingtalk", {}).get("webhook", "")
+        self.smtp_config = smtp_config or notif_config.get("smtp", {})
         self.thresholds = thresholds or AlertThreshold()
         self._recent_alerts = {}
-        self._dedup_window = 300
+        self._dedup_window = alert_config.get("dedup_window", 300)
 
     def check_and_create_alerts(self, sensor_data: Dict) -> List[Alert]:
         """
@@ -160,14 +181,17 @@ class AlertManager:
         alerts = []
         now = datetime.now().isoformat()
 
+        orange_mold = self.thresholds.yellow_mold * 4
+        red_mold = self.thresholds.yellow_mold * 10
+
         if mold_spore > self.thresholds.yellow_mold:
             level = "yellow"
             msg = f"【黄色提醒】书架 {shelf_id} 格口 {slot_id} 霉菌孢子浓度偏高：{mold_spore:.0f} CFU/m³（阈值{self.thresholds.yellow_mold}）"
 
-            if mold_spore > 2000:
+            if mold_spore > orange_mold:
                 level = "orange"
                 msg = f"【橙色告警】书架 {shelf_id} 格口 {slot_id} 霉菌孢子浓度过高：{mold_spore:.0f} CFU/m³，存在霉变风险！"
-            if mold_spore > 5000:
+            if mold_spore > red_mold:
                 level = "red"
                 msg = f"【红色告警】书架 {shelf_id} 格口 {slot_id} 霉菌孢子浓度严重超标：{mold_spore:.0f} CFU/m³，请立即采取防霉措施！"
 
@@ -190,11 +214,13 @@ class AlertManager:
         alerts = []
         now = datetime.now().isoformat()
 
+        red_light = self.thresholds.orange_light * 2
+
         if light > self.thresholds.orange_light:
             level = "orange"
             msg = f"【橙色告警】书架 {shelf_id} 格口 {slot_id} 光照强度超标：{light:.1f} lux（阈值{self.thresholds.orange_light}）"
 
-            if light > 100:
+            if light > red_light:
                 level = "red"
                 msg = f"【红色告警】书架 {shelf_id} 格口 {slot_id} 光照强度严重超标：{light:.1f} lux，纸张光老化风险极高！"
 

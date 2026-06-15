@@ -1,3 +1,5 @@
-from .main import app
+"""
+古代医学文献馆藏微环境监测系统
+"""
 
-__all__ = ['app']
+__version__ = "2.0.0"

@@ -2,73 +2,44 @@ import math
 from datetime import datetime, timedelta
 from typing import Tuple, List, Dict, Optional
 
+from ..core.config import config
+from .arrhenius import ArrheniusAgingModel
+
 
 class MoldGrowthModel:
     """
     霉菌生长模型
     基于温度和相对湿度的响应函数
     参考霉菌生长预测模型（如MRTD、MMV模型）
+    所有参数从config.yaml加载，不再硬编码
     """
 
-    MOLD_TYPES = {
-        "aspergillus": {
-            "name": "曲霉",
-            "opt_temp": 25.0,
-            "min_temp": 10.0,
-            "max_temp": 45.0,
-            "opt_humidity": 85.0,
-            "min_humidity": 65.0,
-            "growth_rate": 1.0,
-            "spore_production": 0.8,
-            "paper_damage": 0.6
-        },
-        "penicillium": {
-            "name": "青霉",
-            "opt_temp": 22.0,
-            "min_temp": 5.0,
-            "max_temp": 35.0,
-            "opt_humidity": 80.0,
-            "min_humidity": 70.0,
-            "growth_rate": 0.8,
-            "spore_production": 1.0,
-            "paper_damage": 0.7
-        },
-        "chaetomium": {
-            "name": "毛壳菌",
-            "opt_temp": 28.0,
-            "min_temp": 15.0,
-            "max_temp": 40.0,
-            "opt_humidity": 90.0,
-            "min_humidity": 75.0,
-            "growth_rate": 0.7,
-            "spore_production": 0.6,
-            "paper_damage": 1.0
-        },
-        "trichoderma": {
-            "name": "木霉",
-            "opt_temp": 27.0,
-            "min_temp": 8.0,
-            "max_temp": 38.0,
-            "opt_humidity": 88.0,
-            "min_humidity": 72.0,
-            "growth_rate": 1.2,
-            "spore_production": 0.9,
-            "paper_damage": 0.8
-        }
-    }
-
     def __init__(self, mold_type: str = "mixed"):
+        mold_config = config.get_mold_config()
+        self.mold_types = mold_config.get("mold_types", {})
         self.mold_type = mold_type
         self.params = self._get_params()
 
     def _get_params(self) -> Dict:
-        if self.mold_type in self.MOLD_TYPES:
-            return self.MOLD_TYPES[self.mold_type]
+        if self.mold_type in self.mold_types:
+            return self.mold_types[self.mold_type]
         else:
             return self._get_mixed_params()
 
     def _get_mixed_params(self) -> Dict:
-        types = list(self.MOLD_TYPES.values())
+        types = list(self.mold_types.values())
+        if not types:
+            return {
+                "name": "混合霉菌",
+                "opt_temp": 25.0,
+                "min_temp": 5.0,
+                "max_temp": 45.0,
+                "opt_humidity": 85.0,
+                "min_humidity": 65.0,
+                "growth_rate": 1.0,
+                "spore_production": 0.8,
+                "paper_damage": 0.8
+            }
         n = len(types)
         return {
             "name": "混合霉菌",
@@ -262,14 +233,18 @@ def calculate_combined_risk(temperature: float, humidity: float, ph_value: float
     """
     计算综合病害风险
     综合考虑酸化、霉变等因素
+    所有阈值从config.yaml加载
     """
+    thresholds = config.get_alert_thresholds()
+    yellow_ph = thresholds.get("yellow_ph", 6.5)
+
     mold_model = MoldGrowthModel()
     aging_model = ArrheniusAgingModel()
 
     mold_risk = mold_model.mold_risk_index(temperature, humidity, mold_spores)
     aging_info = aging_model.aging_index(temperature, humidity, ph_value)
 
-    acid_risk_score = max(0, (6.5 - ph_value) / 2.0 * 100) if ph_value < 6.5 else 0
+    acid_risk_score = max(0, (yellow_ph - ph_value) / 2.0 * 100) if ph_value < yellow_ph else 0
 
     if acid_risk_score >= 80 or mold_risk["risk_score"] >= 80:
         overall_level = "critical"
