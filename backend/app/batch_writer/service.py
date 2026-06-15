@@ -21,6 +21,9 @@ from ..core.messages import (
     AlertMessage,
     AgingPredictionResult,
     MoldPredictionResult,
+    CrossLibraryComparisonResult,
+    BookMetaExtractResult,
+    EfficacyEvaluationResult,
 )
 from ..core.queue_manager import queue_manager, AsyncQueueWrapper
 
@@ -418,6 +421,66 @@ class BatchWriterService:
                 "is_active_mold": 1 if msg.is_active_mold else 0,
             }
             return ("mold_prediction", record)
+
+        elif isinstance(msg, CrossLibraryComparisonResult):
+            record = {
+                "timestamp": msg.timestamp,
+                "record_date": msg.record_date,
+                "library_name": msg.library_name,
+                "metric": msg.metric,
+                "value": msg.value,
+                "percentile": msg.percentile,
+                "percentile_rank": msg.percentile_rank,
+                "total_libraries": msg.total_libraries,
+                "is_anomaly": 1 if msg.is_anomaly else 0,
+                "data_source": msg.data_source,
+            }
+            return ("comparison_data", record)
+
+        elif isinstance(msg, EfficacyEvaluationResult):
+            record = {
+                "timestamp": msg.timestamp,
+                "prescription": msg.prescription,
+                "shelf_id": msg.shelf_id,
+                "slot_id": msg.slot_id,
+                "treatment_group": msg.treatment_group,
+                "reduction_rate": msg.reduction_rate,
+                "efficacy_mean": msg.efficacy_mean,
+                "efficacy_ci_low": msg.efficacy_ci_low,
+                "efficacy_ci_high": msg.efficacy_ci_high,
+                "posterior_mean": msg.posterior_mean,
+                "posterior_var": msg.posterior_var,
+                "sample_size": msg.sample_size,
+                "spores_before": msg.spores_before,
+                "spores_after": msg.spores_after,
+            }
+            return ("efficacy_evaluation", record)
+
+        elif isinstance(msg, BookMetaExtractResult):
+            text_features = msg.text_features if msg.text_features else [0.0] * 8
+            record = {
+                "timestamp": msg.timestamp,
+                "book_id": msg.book_id,
+                "shelf_id": msg.shelf_id,
+                "slot_id": msg.slot_id,
+                "paper_type": msg.paper_type,
+                "binding_type": msg.binding_type,
+                "repair_records": ",".join(msg.repair_records) if msg.repair_records else "",
+                "repair_count": len(msg.repair_records) if msg.repair_records else 0,
+                "fiber_density": msg.fiber_density,
+                "ink_type": msg.ink_type,
+                "ocr_confidence": msg.ocr_confidence,
+                "text_feature_0": text_features[0] if len(text_features) > 0 else 0.0,
+                "text_feature_1": text_features[1] if len(text_features) > 1 else 0.0,
+                "text_feature_2": text_features[2] if len(text_features) > 2 else 0.0,
+                "text_feature_3": text_features[3] if len(text_features) > 3 else 0.0,
+                "text_feature_4": text_features[4] if len(text_features) > 4 else 0.0,
+                "text_feature_5": text_features[5] if len(text_features) > 5 else 0.0,
+                "text_feature_6": text_features[6] if len(text_features) > 6 else 0.0,
+                "text_feature_7": text_features[7] if len(text_features) > 7 else 0.0,
+                "ocr_text": msg.ocr_text[:1000] if msg.ocr_text else "",
+            }
+            return ("book_meta", record)
 
         else:
             logger.debug(f"忽略未知消息类型: {msg.message_type}")

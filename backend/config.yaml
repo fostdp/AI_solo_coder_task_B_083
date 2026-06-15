@@ -34,6 +34,18 @@ batch_writer:
       columns: ["timestamp", "sensor_id", "shelf_id", "slot_id", "ph_value", "sensor_type"]
     - name: "alerts"
       columns: ["alert_id", "timestamp", "shelf_id", "slot_id", "alert_level", "alert_type", "alert_value", "threshold", "message", "is_handled"]
+    - name: "comparison_data"
+      columns: ["timestamp", "record_date", "library_name", "metric", "value", "percentile", "percentile_rank", "total_libraries", "is_anomaly", "data_source"]
+    - name: "efficacy_evaluation"
+      columns: ["timestamp", "prescription", "shelf_id", "slot_id", "treatment_group", "reduction_rate", "efficacy_mean", "efficacy_ci_low", "efficacy_ci_high", "posterior_mean", "posterior_var", "sample_size", "spores_before", "spores_after"]
+    - name: "aging_prediction"
+      columns: ["timestamp", "shelf_id", "slot_id", "paper_type", "ph_decay_rate", "predicted_lifetime_years", "ph_30d", "ph_90d", "ph_180d", "ph_365d", "severity"]
+    - name: "mold_prediction"
+      columns: ["timestamp", "shelf_id", "slot_id", "risk_score", "risk_level", "growth_rate", "predicted_spores_7d", "predicted_spores_30d", "is_active_mold"]
+    - name: "spread_results"
+      columns: ["prediction_date", "model_type", "shelf_id", "slot_id", "day", "S", "E", "I", "R", "infection_prob", "is_hotspot", "spread_from", "edge_weight"]
+    - name: "book_meta"
+      columns: ["book_id", "paper_type", "binding_type", "fiber_density", "ink_type", "ocr_confidence", "extraction_time"]
 
 aging_engine:
   run_interval: 3600
@@ -45,6 +57,66 @@ mold_engine:
   run_interval: 1800
   default_mold_type: "mixed"
   prediction_days: [7, 30]
+
+text_miner:
+  run_interval: 86400
+  ocr_simulate: true
+  min_confidence: 0.7
+  paper_type_keywords:
+    "竹纸": "bamboo"
+    "棉纸": "cotton"
+    "皮纸": "cotton"
+    "宣纸": "rice"
+    "开化纸": "kaihua"
+    "雪连纸": "xuelian"
+  binding_types: ["线装", "蝴蝶装", "包背装", "梵夹装", "卷轴装"]
+  repair_keywords: ["修复", "重装", "补缀", "托裱", "衬纸"]
+
+efficacy_engine:
+  run_interval: 3600
+  control_group_shelves: ["SHELF-01", "SHELF-02"]
+  treatment_group_shelves:
+    yuncao: ["SHELF-03", "SHELF-04"]
+    huangbo: ["SHELF-05", "SHELF-06"]
+    yanye: ["SHELF-07", "SHELF-08"]
+  bayesian_prior:
+    alpha: 2.0
+    beta: 2.0
+  min_sample_size: 10
+  ci_level: 0.95
+
+comparator:
+  run_interval: 86400
+  run_hour: 2
+  anomaly_percentile_threshold: 95.0
+  csv_data_path: "data/cross_library_comparison.csv"
+  libraries:
+    - "本馆"
+    - "国家图书馆"
+    - "上海图书馆"
+    - "南京图书馆"
+    - "浙江图书馆"
+    - "故宫博物院"
+    - "北京大学图书馆"
+    - "中国科学院图书馆"
+  metrics: ["temperature", "humidity", "ph", "mold_spore"]
+
+spread_engine:
+  run_interval: 7200
+  prediction_days: 30
+  model_type: "SEIR"
+  seir_params:
+    beta: 0.3
+    sigma: 0.2
+    gamma: 0.1
+    mu: 0.01
+  edge_weight_params:
+    distance_factor: 0.01
+    ventilation_factor: 0.7
+    adjacency_bonus: 1.5
+  hotspot_threshold: 0.5
+  ventilation_default: 0.5
+  shelf_distance_default: 1.0
 
 algorithms:
   arrhenius:

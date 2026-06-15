@@ -161,6 +161,122 @@ class ControlMessage(Message):
         self.message_type = "control"
 
 
+@dataclass
+class BookMetaExtractRequest(Message):
+    """医籍元数据提取请求"""
+    book_id: str = ""
+    shelf_id: str = ""
+    slot_id: str = ""
+    image_path: str = ""
+
+    def __post_init__(self):
+        self.message_type = "book_meta_extract_request"
+
+
+@dataclass
+class BookMetaExtractResult(Message):
+    """医籍元数据提取结果"""
+    book_id: str = ""
+    shelf_id: str = ""
+    slot_id: str = ""
+    paper_type: str = ""
+    binding_type: str = ""
+    repair_records: List[str] = field(default_factory=list)
+    fiber_density: float = 0.0
+    ink_type: str = ""
+    ocr_confidence: float = 0.0
+    text_features: List[float] = field(default_factory=list)
+    ocr_text: str = ""
+
+    def __post_init__(self):
+        self.message_type = "book_meta_extract_result"
+
+
+@dataclass
+class EfficacyEvaluationRequest(Message):
+    """药方有效性评估请求"""
+    prescription: str = ""
+    shelf_id: str = ""
+    slot_id: str = ""
+    treatment_group: str = ""
+    duration_days: int = 30
+
+    def __post_init__(self):
+        self.message_type = "efficacy_evaluation_request"
+
+
+@dataclass
+class EfficacyEvaluationResult(Message):
+    """药方有效性评估结果"""
+    prescription: str = ""
+    shelf_id: str = ""
+    slot_id: str = ""
+    treatment_group: str = ""
+    reduction_rate: float = 0.0
+    efficacy_mean: float = 0.0
+    efficacy_ci_low: float = 0.0
+    efficacy_ci_high: float = 0.0
+    posterior_mean: float = 0.0
+    posterior_var: float = 0.0
+    sample_size: int = 0
+    spores_before: float = 0.0
+    spores_after: float = 0.0
+
+    def __post_init__(self):
+        self.message_type = "efficacy_evaluation_result"
+
+
+@dataclass
+class CrossLibraryComparisonResult(Message):
+    """跨馆藏比对结果"""
+    record_date: str = ""
+    library_name: str = ""
+    metric: str = ""
+    value: float = 0.0
+    percentile: float = 0.0
+    percentile_rank: int = 0
+    total_libraries: int = 0
+    is_anomaly: bool = False
+    data_source: str = ""
+
+    def __post_init__(self):
+        self.message_type = "cross_library_comparison_result"
+
+
+@dataclass
+class SpreadPredictionRequest(Message):
+    """传播预测请求"""
+    prediction_date: str = ""
+    model_type: str = "SEIR"
+    start_shelf_id: str = ""
+    days: int = 30
+    initial_infected: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        self.message_type = "spread_prediction_request"
+
+
+@dataclass
+class SpreadPredictionResult(Message):
+    """传播预测结果"""
+    prediction_date: str = ""
+    model_type: str = "SEIR"
+    day: int = 0
+    shelf_id: str = ""
+    slot_id: str = ""
+    S: float = 0.0
+    E: float = 0.0
+    I: float = 0.0
+    R: float = 0.0
+    infection_prob: float = 0.0
+    is_hotspot: bool = False
+    spread_from: str = ""
+    edge_weight: float = 0.0
+
+    def __post_init__(self):
+        self.message_type = "spread_prediction_result"
+
+
 MESSAGE_CLASSES = {
     "sensor_data": SensorData,
     "aging_prediction_request": AgingPredictionRequest,
@@ -170,6 +286,13 @@ MESSAGE_CLASSES = {
     "alert": AlertMessage,
     "clickhouse_record": ClickHouseRecord,
     "control": ControlMessage,
+    "book_meta_extract_request": BookMetaExtractRequest,
+    "book_meta_extract_result": BookMetaExtractResult,
+    "efficacy_evaluation_request": EfficacyEvaluationRequest,
+    "efficacy_evaluation_result": EfficacyEvaluationResult,
+    "cross_library_comparison": CrossLibraryComparisonResult,
+    "spread_prediction_request": SpreadPredictionRequest,
+    "spread_prediction_result": SpreadPredictionResult,
 }
 
 

@@ -182,3 +182,103 @@ INSERT INTO books_info (book_id, shelf_id, slot_id, title, dynasty, author, cate
 ('BK010', 'SHELF-03', 'SLOT-A2', '针灸甲乙经（清康熙版）', '清', '皇甫谧', '针灸', '棉纸', 1699, '良好'),
 ('BK011', 'SHELF-03', 'SLOT-B1', '景岳全书（清乾隆刻本）', '清', '张介宾', '综合', '竹纸', 1750, '良好'),
 ('BK012', 'SHELF-03', 'SLOT-B2', '医宗金鉴（清乾隆武英殿版）', '清', '吴谦', '综合', '开化纸', 1742, '良好');
+
+CREATE TABLE IF NOT EXISTS book_meta
+(
+    book_id        String,
+    ocr_text       String,
+    paper_type     String,
+    binding_type   String,
+    repair_records Array(String),
+    text_features  Array(Float64),
+    fiber_density  Float64,
+    ink_type       String,
+    extraction_time DateTime64(3) DEFAULT now64(),
+    ocr_confidence Float64,
+    create_time    DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (book_id, create_time)
+COMMENT '医籍OCR元数据提取表';
+
+CREATE TABLE IF NOT EXISTS prescription_efficacy
+(
+    timestamp       DateTime64(3) DEFAULT now64(),
+    prescription    String,
+    shelf_id        String,
+    slot_id         String,
+    treatment_group String,
+    spores_before   Float64,
+    spores_after    Float64,
+    reduction_rate  Float64,
+    efficacy_mean   Float64,
+    efficacy_ci_low Float64,
+    efficacy_ci_high Float64,
+    posterior_mean  Float64,
+    posterior_var   Float64,
+    sample_size     Int32,
+    model_version   String DEFAULT 'v1.0'
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (prescription, shelf_id, timestamp)
+TTL timestamp + INTERVAL 1 YEAR
+COMMENT '防蠹药方有效性评估表';
+
+CREATE TABLE IF NOT EXISTS comparison_data
+(
+    record_date     Date,
+    library_name    String,
+    avg_temperature Float64,
+    avg_humidity    Float64,
+    avg_ph          Float64,
+    avg_mold_spore  Float64,
+    temp_percentile Float64,
+    humid_percentile Float64,
+    ph_percentile   Float64,
+    mold_percentile Float64,
+    data_source     String,
+    create_time     DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(record_date)
+ORDER BY (record_date, library_name)
+TTL record_date + INTERVAL 2 YEAR
+COMMENT '跨馆藏环境比对数据表';
+
+CREATE TABLE IF NOT EXISTS spread_results
+(
+    prediction_date Date,
+    model_type      String,
+    shelf_id        String,
+    slot_id         String,
+    day             Int32,
+    S               Float64,
+    E               Float64,
+    I               Float64,
+    R               Float64,
+    infection_prob  Float64,
+    is_hotspot      UInt8,
+    spread_from     String,
+    edge_weight     Float64,
+    create_time     DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(prediction_date)
+ORDER BY (prediction_date, shelf_id, slot_id, day)
+TTL prediction_date + INTERVAL 6 MONTH
+COMMENT '病害传播网络分析结果表';
+
+CREATE TABLE IF NOT EXISTS shelf_graph
+(
+    shelf_id        String,
+    neighbor_id     String,
+    distance        Float64,
+    ventilation     Float64,
+    edge_weight     Float64,
+    direction       String,
+    create_time     DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (shelf_id, neighbor_id)
+COMMENT '书架邻接关系图表';

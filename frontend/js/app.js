@@ -22,6 +22,9 @@ function init() {
     loadShelves();
     loadHeatmapData();
     loadRecentAlerts();
+    loadSpreadDirections();
+    loadEfficacySummary();
+    loadComparatorStats();
     updateTime();
     setInterval(updateTime, 1000);
     setInterval(refreshData, 300000);
@@ -627,4 +630,197 @@ function renderMockKnowledge() {
         li.textContent = tip;
         tipsContainer.appendChild(li);
     });
+}
+
+async function loadSpreadDirections() {
+    try {
+        const response = await fetch(`${API_BASE}/api/spread/directions`);
+        const data = await response.json();
+        if (data.directions && data.directions.length > 0) {
+            shelf3d.setSpreadDirections(data.directions);
+        }
+    } catch (e) {
+        console.error('加载传播方向失败:', e);
+    }
+}
+
+async function loadEfficacySummary() {
+    try {
+        const response = await fetch(`${API_BASE}/api/efficacy/summary`);
+        const data = await response.json();
+        renderEfficacyPanel(data);
+    } catch (e) {
+        console.error('加载药效摘要失败:', e);
+        renderMockEfficacyPanel();
+    }
+}
+
+function renderEfficacyPanel(data) {
+    const container = document.getElementById('efficacyPanel');
+    if (!container) return;
+
+    const prescriptions = data.prescriptions || {};
+    const names = { yuncao: '芸草', huangbo: '黄柏', yanye: '烟叶' };
+
+    let html = '<h4>防蠹药方效果评估</h4>';
+    html += '<div class="efficacy-cards">';
+
+    for (const [key, info] of Object.entries(prescriptions)) {
+        const name = names[key] || key;
+        html += `
+            <div class="efficacy-card">
+                <div class="efficacy-name">${name}</div>
+                <div class="efficacy-meta">治疗组: ${(info.treatment_shelves || []).join(', ')}</div>
+                <div class="efficacy-meta">数据点: ${info.treatment_data_points || 0} / ${info.control_data_points || 0}</div>
+            </div>
+        `;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function renderMockEfficacyPanel() {
+    const container = document.getElementById('efficacyPanel');
+    if (!container) return;
+
+    const mockData = [
+        { name: '芸草', shelves: 'SHELF-03, SHELF-04', points: 45 },
+        { name: '黄柏', shelves: 'SHELF-05, SHELF-06', points: 38 },
+        { name: '烟叶', shelves: 'SHELF-07, SHELF-08', points: 42 }
+    ];
+
+    let html = '<h4>防蠹药方效果评估</h4>';
+    html += '<div class="efficacy-cards">';
+
+    mockData.forEach(item => {
+        html += `
+            <div class="efficacy-card">
+                <div class="efficacy-name">${item.name}</div>
+                <div class="efficacy-meta">治疗组: ${item.shelves}</div>
+                <div class="efficacy-meta">数据点: ${item.points}</div>
+            </div>
+        `;
+    });
+
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+async function loadComparatorStats() {
+    try {
+        const response = await fetch(`${API_BASE}/api/comparator/stats`);
+        const data = await response.json();
+        renderComparatorPanel(data);
+    } catch (e) {
+        console.error('加载比对统计失败:', e);
+        renderMockComparatorPanel();
+    }
+}
+
+function renderComparatorPanel(data) {
+    const container = document.getElementById('comparatorPanel');
+    if (!container) return;
+
+    const stats = data.stats || {};
+    let html = '<h4>跨馆藏环境比对</h4>';
+    html += '<div class="comparator-info">';
+    html += `<div class="comp-stat">总比对次数: ${stats.total_comparisons || 0}</div>`;
+    html += `<div class="comp-stat">异常次数: ${stats.total_anomalies || 0}</div>`;
+    html += `<div class="comp-stat">最近运行: ${stats.last_run_time || '待运行'}</div>`;
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function renderMockComparatorPanel() {
+    const container = document.getElementById('comparatorPanel');
+    if (!container) return;
+
+    let html = '<h4>跨馆藏环境比对</h4>';
+    html += '<div class="comparator-info">';
+    html += '<div class="comp-stat">总比对次数: 0</div>';
+    html += '<div class="comp-stat">异常次数: 0</div>';
+    html += '<div class="comp-stat">最近运行: 待运行</div>';
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+async function evaluateEfficacy(prescription) {
+    try {
+        const response = await fetch(`${API_BASE}/api/efficacy/evaluate/${prescription}`);
+        const data = await response.json();
+        showEfficacyResult(prescription, data);
+    } catch (e) {
+        console.error('药效评估失败:', e);
+    }
+}
+
+function showEfficacyResult(prescription, data) {
+    const names = { yuncao: '芸草', huangbo: '黄柏', yanye: '烟叶' };
+    const name = names[prescription] || prescription;
+
+    const panel = document.getElementById('efficacyPanel');
+    if (!panel) return;
+
+    const existing = panel.querySelector('.efficacy-result');
+    if (existing) existing.remove();
+
+    const resultDiv = document.createElement('div');
+    resultDiv.className = 'efficacy-result';
+    resultDiv.innerHTML = `
+        <h5>${name} 评估结果</h5>
+        <div class="eff-row"><span>孢子减少率:</span><span>${((data.reduction_rate || 0) * 100).toFixed(1)}%</span></div>
+        <div class="eff-row"><span>后验均值:</span><span>${(data.posterior_mean || 0).toFixed(4)}</span></div>
+        <div class="eff-row"><span>95%可信区间:</span><span>[${(data.efficacy_ci_low || 0).toFixed(4)}, ${(data.efficacy_ci_high || 0).toFixed(4)}]</span></div>
+        <div class="eff-row"><span>样本量:</span><span>${data.sample_size || 0}</span></div>
+        <div class="eff-row"><span>处理前孢子:</span><span>${(data.spores_before || 0).toFixed(1)} CFU/m³</span></div>
+        <div class="eff-row"><span>处理后孢子:</span><span>${(data.spores_after || 0).toFixed(1)} CFU/m³</span></div>
+    `;
+    panel.appendChild(resultDiv);
+}
+
+async function runSpreadPrediction() {
+    try {
+        const response = await fetch(`${API_BASE}/api/spread/predict`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                start_shelf_id: 'SHELF-01',
+                initial_infected: ['SHELF-01'],
+                days: 30
+            })
+        });
+        const data = await response.json();
+        loadSpreadDirections();
+        shelf3d.toggleSpreadArrows(true);
+
+        const hotResp = await fetch(`${API_BASE}/api/spread/hotspots`);
+        const hotData = await hotResp.json();
+        renderSpreadHotspots(hotData.hotspots || []);
+    } catch (e) {
+        console.error('传播预测失败:', e);
+    }
+}
+
+function renderSpreadHotspots(hotspots) {
+    const container = document.getElementById('spreadHotspots');
+    if (!container) return;
+
+    let html = '<h4>传播热点预测</h4>';
+    if (hotspots.length === 0) {
+        html += '<div class="empty-tip">暂无热点数据</div>';
+    } else {
+        html += '<div class="hotspot-list">';
+        hotspots.forEach(h => {
+            const prob = ((h.max_infection_prob || 0) * 100).toFixed(1);
+            const firstDay = h.first_day || '-';
+            html += `<div class="hotspot-item">
+                <span class="hotspot-id">${h.shelf_id}</span>
+                <span class="hotspot-prob">感染概率: ${prob}%</span>
+                <span class="hotspot-day">首日: 第${firstDay}天</span>
+            </div>`;
+        });
+        html += '</div>';
+    }
+    container.innerHTML = html;
 }

@@ -729,3 +729,113 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: #a1a1a1;
 }
+
+.efficacy-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.efficacy-card {
+    background: linear-gradient(135deg, #f9f3e3 0%, #f0e6cc 100%);
+    border: 1px solid #d4b896;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+
+.efficacy-name {
+    font-weight: 600;
+    color: #8B4513;
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+
+.efficacy-meta {
+    font-size: 11px;
+    color: #8c7a5e;
+    margin-top: 2px;
+}
+
+.efficacy-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+.efficacy-actions .ctrl-btn {
+    font-size: 11px;
+    padding: 3px 8px;
+}
+
+.efficacy-result {
+    margin-top: 10px;
+    padding: 10px;
+    background: rgba(139, 69, 19, 0.08);
+    border-radius: 8px;
+    border: 1px solid #d4b896;
+}
+
+.efficacy-result h5 {
+    color: #8B4513;
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+
+.eff-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(139, 69, 19, 0.1);
+}
+
+.eff-row span:last-child {
+    font-weight: 600;
+    color: #5c3a1e;
+}
+
+.comparator-info {
+    margin-top: 6px;
+}
+
+.comp-stat {
+    font-size: 12px;
+    color: #8c7a5e;
+    padding: 3px 0;
+}
+
+.hotspot-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.hotspot-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(255, 77, 79, 0.08);
+    border-radius: 6px;
+    border-left: 3px solid #ff4d4f;
+    font-size: 12px;
+}
+
+.hotspot-id {
+    font-weight: 600;
+    color: #8B4513;
+    min-width: 70px;
+}
+
+.hotspot-prob {
+    color: #ff4d4f;
+    font-weight: 500;
+}
+
+.hotspot-day {
+    color: #999;
+    font-size: 11px;
+}

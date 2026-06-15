@@ -32,6 +32,10 @@ from .batch_writer import BatchWriterService
 from .aging_engine import AgingEngineService
 from .mold_engine import MoldEngineService
 from .alerter import AlerterService
+from .text_miner import TextMinerService
+from .efficacy_engine import EfficacyEngineService
+from .comparator import CrossLibraryComparatorService
+from .spread_model import SpreadModelService
 
 setup_loguru_logging(config)
 
@@ -45,6 +49,10 @@ class SystemServices:
         self.aging_engine: Optional[AgingEngineService] = None
         self.mold_engine: Optional[MoldEngineService] = None
         self.alerter: Optional[AlerterService] = None
+        self.text_miner: Optional[TextMinerService] = None
+        self.efficacy_engine: Optional[EfficacyEngineService] = None
+        self.comparator: Optional[CrossLibraryComparatorService] = None
+        self.spread_model: Optional[SpreadModelService] = None
         self.clickhouse_client: Optional[Client] = None
 
         self._running = False
@@ -70,6 +78,10 @@ class SystemServices:
         self.aging_engine = AgingEngineService()
         self.mold_engine = MoldEngineService()
         self.alerter = AlerterService()
+        self.text_miner = TextMinerService()
+        self.efficacy_engine = EfficacyEngineService()
+        self.comparator = CrossLibraryComparatorService(batch_writer_service=self.batch_writer)
+        self.spread_model = SpreadModelService(batch_writer_service=self.batch_writer)
 
         await self._connect_queues()
         logger.info("系统服务初始化完成")
@@ -78,6 +90,8 @@ class SystemServices:
         """连接各模块的队列"""
         assert self.ingest and self.batch_writer and self.alerter
         assert self.aging_engine and self.mold_engine
+        assert self.text_miner and self.efficacy_engine
+        assert self.comparator and self.spread_model
 
         self.batch_writer.register_input_queue(self.ingest.get_sensor_queue())
         self.batch_writer.register_input_queue(self.alerter._input_queue)
@@ -87,7 +101,15 @@ class SystemServices:
 
         self.aging_engine.register_output_queue(self.alerter._input_queue)
 
-        logger.info("队列连接完成: ingest → batch_writer, ingest → alerter, aging_engine → alerter")
+        self.batch_writer.register_input_queue(self.text_miner.get_output_queue())
+
+        self.batch_writer.register_input_queue(self.efficacy_engine.get_result_queue())
+
+        self.comparator.register_alert_queue(self.alerter._input_queue)
+
+        logger.info("队列连接完成: ingest → batch_writer, ingest → alerter, "
+                     "aging_engine → alerter, text_miner → batch_writer, "
+                     "efficacy_engine → batch_writer, comparator → alerter")
 
     async def start(self):
         """启动所有服务"""
@@ -102,6 +124,10 @@ class SystemServices:
             self.aging_engine.start(),
             self.mold_engine.start(),
             self.alerter.start(),
+            self.text_miner.start(),
+            self.efficacy_engine.start(),
+            self.comparator.start(),
+            self.spread_model.start(),
         )
 
         self._running = True
@@ -124,6 +150,10 @@ class SystemServices:
             self.aging_engine.stop(),
             self.mold_engine.stop(),
             self.alerter.stop(),
+            self.text_miner.stop(),
+            self.efficacy_engine.stop(),
+            self.comparator.stop(),
+            self.spread_model.stop(),
         )
 
         queue_manager.close_all_process_queues()
@@ -180,6 +210,10 @@ class SystemServices:
                 "aging_engine": self.aging_engine.get_stats() if self.aging_engine else {},
                 "mold_engine": self.mold_engine.get_stats() if self.mold_engine else {},
                 "alerter": self.alerter.get_stats() if self.alerter else {},
+                "text_miner": self.text_miner.get_stats() if self.text_miner else {},
+                "efficacy_engine": self.efficacy_engine.get_stats() if self.efficacy_engine else {},
+                "comparator": self.comparator.get_stats() if self.comparator else {},
+                "spread_model": self.spread_model.get_stats() if self.spread_model else {},
             },
             "queues": queue_manager.get_all_stats(),
         }
@@ -421,3 +455,124 @@ async def test_alert(req: AlertTestRequest):
             status_code=500,
             content={"success": False, "error": str(e)}
         )
+
+
+@app.post("/api/text_miner/extract/{book_id}")
+async def extract_book_meta(book_id: str):
+    """提取单本书籍的OCR元数据"""
+    try:
+        from .database import db_manager
+        books = db_manager.get_books_info()
+        book_info = None
+        for book in books:
+            if book.get("book_id") == book_id:
+                book_info = book
+                break
+        if not book_info:
+            return JSONResponse(status_code=404, content={"error": f"未找到书籍: {book_id}"})
+        result = await services.text_miner.extract_meta(
+            book_id, book_info.get("shelf_id", ""), book_info.get("slot_id", ""), book_info
+        )
+        if result:
+            return result.to_dict()
+        return JSONResponse(status_code=500, content={"error": "元数据提取失败"})
+    except Exception as e:
+        logger.error(f"书籍元数据提取失败: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/text_miner/extract_all")
+async def extract_all_books():
+    """提取所有书籍的OCR元数据"""
+    try:
+        count = await services.text_miner.process_all_books()
+        return {"success": True, "processed_count": count}
+    except Exception as e:
+        logger.error(f"批量提取失败: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/text_miner/meta/{book_id}")
+async def get_book_meta(book_id: str):
+    """获取书籍元数据"""
+    result = await services.text_miner.get_book_meta(book_id)
+    if result:
+        return result.to_dict()
+    return JSONResponse(status_code=404, content={"error": f"未找到书籍元数据: {book_id}"})
+
+
+@app.get("/api/efficacy/evaluate/{prescription}")
+async def evaluate_prescription_efficacy(
+    prescription: str,
+    shelf_id: Optional[str] = None,
+    slot_id: Optional[str] = None
+):
+    """评估单个药方的防霉效果"""
+    if prescription not in ("yuncao", "huangbo", "yanye"):
+        return JSONResponse(status_code=400, content={"error": "无效药方，可选: yuncao, huangbo, yanye"})
+    result = await services.efficacy_engine.evaluate_prescription(prescription, shelf_id, slot_id)
+    if result:
+        return result.to_dict()
+    return JSONResponse(status_code=503, content={"error": "数据不足，无法评估"})
+
+
+@app.get("/api/efficacy/evaluate_all")
+async def evaluate_all_prescriptions():
+    """评估所有药方的防霉效果"""
+    results = await services.efficacy_engine.evaluate_all()
+    return {"results": [r.to_dict() for r in results]}
+
+
+@app.get("/api/efficacy/summary")
+async def get_efficacy_summary():
+    """获取药效评估摘要"""
+    return services.efficacy_engine.get_efficacy_summary()
+
+
+@app.get("/api/comparator/compare")
+async def run_cross_library_comparison():
+    """执行跨馆藏环境比对"""
+    try:
+        results = await services.comparator.compare_all()
+        return {"results": [r.to_dict() for r in results]}
+    except Exception as e:
+        logger.error(f"跨馆藏比对失败: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/comparator/stats")
+async def get_comparator_stats():
+    """获取跨馆藏比对统计"""
+    return services.comparator.get_stats()
+
+
+@app.post("/api/spread/predict")
+async def predict_spread(request: Dict[str, Any]):
+    """提交病害传播预测请求"""
+    try:
+        from .core.messages import SpreadPredictionRequest
+        req = SpreadPredictionRequest(**request)
+        results = await services.spread_model.predict_spread(
+            req.initial_infected or ([req.start_shelf_id] if req.start_shelf_id else [])
+        )
+        return {"results": [r.to_dict() for r in results[:100]]}
+    except Exception as e:
+        logger.error(f"传播预测失败: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/spread/hotspots")
+async def get_spread_hotspots(threshold: Optional[float] = None):
+    """获取病害传播热点书架"""
+    hotspots = await services.spread_model.get_hotspots(threshold)
+    return {"hotspots": hotspots}
+
+
+@app.get("/api/spread/directions")
+async def get_spread_directions():
+    """获取书架间传播方向箭头（用于前端可视化）"""
+    directions = services.spread_model.get_spread_directions()
+    graph_data = {}
+    if services.spread_model._shelf_graph:
+        graph_data = services.spread_model._shelf_graph.to_dict()
+    return {"directions": directions, "graph": graph_data}

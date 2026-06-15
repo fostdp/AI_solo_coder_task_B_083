@@ -17,13 +17,80 @@ from ..core.config import config
 from ..core.messages import (
     AgingPredictionRequest,
     AgingPredictionResult,
+    BookMetaExtractResult,
     ControlMessage,
     deserialize_message,
     serialize_message,
 )
 from ..core.queue_manager import queue_manager, ProcessQueueWrapper
 
+try:
+    from ..database import db_manager
+except (ImportError, ValueError):
+    db_manager = None
+
 logger = logging.getLogger(__name__)
+
+
+class ProportionalHazardsModel:
+    """
+    比例风险模型 (Cox模型)
+    用于根据书籍元数据调整老化速率
+
+    风险比 HR = exp(β1*binding_factor + β2*repair_count + β3*fiber_density + β4*ink_acidic)
+    """
+
+    def __init__(self):
+        self.beta_binding = 0.15
+        self.beta_repair = 0.10
+        self.beta_fiber = -0.30
+        self.beta_ink = 0.25
+
+        self.binding_factors = {
+            "线装": 0.8,
+            "蝴蝶装": 1.0,
+            "包背装": 0.9,
+            "梵夹装": 1.2,
+            "卷轴装": 1.1,
+        }
+
+        self.ink_acidic_map = {
+            "松烟墨": 0.3,
+            "油烟墨": 0.5,
+            "墨汁": 0.8,
+            "朱砂": 0.1,
+            "天然颜料": 0.2,
+        }
+
+    def _get_binding_factor(self, binding_type: str) -> float:
+        return self.binding_factors.get(binding_type, 1.0)
+
+    def _get_ink_acidic(self, ink_type: str) -> float:
+        return self.ink_acidic_map.get(ink_type, 0.5)
+
+    def calculate_hazard_ratio(self, book_meta: Dict[str, Any]) -> float:
+        binding_type = book_meta.get("binding_type", "线装")
+        repair_count = len(book_meta.get("repair_records", []))
+        fiber_density = book_meta.get("fiber_density", 0.7)
+        ink_type = book_meta.get("ink_type", "油烟墨")
+
+        binding_factor = self._get_binding_factor(binding_type)
+        ink_acidic = self._get_ink_acidic(ink_type)
+
+        linear_predictor = (
+            self.beta_binding * binding_factor +
+            self.beta_repair * repair_count +
+            self.beta_fiber * fiber_density +
+            self.beta_ink * ink_acidic
+        )
+
+        hr = math.exp(linear_predictor)
+        hr = max(0.5, min(2.5, hr))
+        return hr
+
+    def adjust_decay_rate(self, base_decay_rate: float, book_meta: Dict[str, Any]) -> float:
+        hr = self.calculate_hazard_ratio(book_meta)
+        return base_decay_rate * hr
 
 
 @dataclass
@@ -232,9 +299,40 @@ class ArrheniusAgingModel:
         else:
             return "critical"
 
-    def aging_index(self, temperature_c: float, humidity: float, current_ph: float) -> Dict[str, Any]:
+    def adjust_rate_by_book_meta(self, decay_rate: float, book_meta: Optional[Dict[str, Any]]) -> float:
+        """
+        根据书籍元数据调整老化速率（应用比例风险模型）
+
+        Args:
+            decay_rate: 基础老化速率
+            book_meta: 书籍元数据，包含binding_type, repair_records, fiber_density, ink_type等
+
+        Returns:
+            调整后的老化速率
+        """
+        if book_meta is None:
+            return decay_rate
+
+        hazards_model = ProportionalHazardsModel()
+        adjusted_rate = hazards_model.adjust_decay_rate(decay_rate, book_meta)
+
+        hr = hazards_model.calculate_hazard_ratio(book_meta)
+        logger.debug(
+            f"老化速率调整: base={decay_rate:.6f}, HR={hr:.3f}, "
+            f"adjusted={adjusted_rate:.6f}, binding={book_meta.get('binding_type')}, "
+            f"repairs={len(book_meta.get('repair_records', []))}"
+        )
+
+        return adjusted_rate
+
+    def aging_index(self, temperature_c: float, humidity: float, current_ph: float,
+                    book_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """综合老化指数"""
         decay_rate = self.ph_decay_rate(temperature_c, humidity, current_ph)
+
+        if book_meta is not None:
+            decay_rate = self.adjust_rate_by_book_meta(decay_rate, book_meta)
+
         lifetime = self.predict_lifetime(current_ph, decay_rate)
 
         return {
@@ -243,7 +341,82 @@ class ArrheniusAgingModel:
             "aging_severity": self.get_severity(lifetime),
             "paper_type": self.display_name,
             "activation_energy": self.Ea,
+            "hazard_ratio": ProportionalHazardsModel().calculate_hazard_ratio(book_meta) if book_meta else 1.0,
         }
+
+
+def _get_book_meta_from_db(shelf_id: str, slot_id: str) -> Optional[Dict[str, Any]]:
+    """
+    从数据库查询书籍元数据
+
+    Args:
+        shelf_id: 书架ID
+        slot_id: 槽位ID
+
+    Returns:
+        书籍元数据字典
+    """
+    if db_manager is None:
+        return None
+
+    try:
+        books = db_manager.get_books_info(shelf_id=shelf_id, slot_id=slot_id)
+        if books:
+            book = books[0]
+            tm_config = config.text_miner
+            paper_type_keywords = tm_config.get("paper_type_keywords", {})
+
+            title = book.get("title", "")
+            material = book.get("material", "")
+
+            binding_types = tm_config.get("binding_types", ["线装", "蝴蝶装", "包背装", "梵夹装", "卷轴装"])
+
+            paper_type = "bamboo"
+            for keyword, pt in paper_type_keywords.items():
+                if keyword in title or keyword in material:
+                    paper_type = pt
+                    break
+
+            binding_type = "线装"
+            for bt in binding_types:
+                if bt in title:
+                    binding_type = bt
+                    break
+
+            repair_records = []
+            repair_keywords = tm_config.get("repair_keywords", ["修复", "重装", "补缀", "托裱", "衬纸"])
+            for kw in repair_keywords:
+                if kw in title:
+                    repair_records.append(f"发现{kw}痕迹")
+
+            fiber_density = {
+                "bamboo": 0.65,
+                "cotton": 0.75,
+                "rice": 0.55,
+                "kaihua": 0.85,
+                "xuelian": 0.80,
+            }.get(paper_type, 0.7)
+
+            ink_type = "油烟墨"
+            if "明" in title and "万历" in title:
+                ink_type = "松烟墨"
+            elif "清" in title:
+                ink_type = "油烟墨"
+            elif "朱砂" in title:
+                ink_type = "朱砂"
+
+            return {
+                "book_id": book.get("book_id", ""),
+                "paper_type": paper_type,
+                "binding_type": binding_type,
+                "repair_records": repair_records,
+                "fiber_density": fiber_density,
+                "ink_type": ink_type,
+            }
+    except Exception as e:
+        logger.debug(f"查询书籍元数据失败: {e}")
+
+    return None
 
 
 def aging_process_main(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue):
@@ -308,6 +481,15 @@ def aging_process_main(input_queue: multiprocessing.Queue, output_queue: multipr
                     )
                     daily_history = []
 
+                book_meta = _get_book_meta_from_db(msg.shelf_id, msg.slot_id)
+                if book_meta is not None:
+                    decay_rate = model.adjust_rate_by_book_meta(decay_rate, book_meta)
+                    logger.info(
+                        f"应用书籍元数据调整: shelf={msg.shelf_id}, slot={msg.slot_id}, "
+                        f"binding={book_meta.get('binding_type')}, "
+                        f"repairs={len(book_meta.get('repair_records', []))}"
+                    )
+
                 lifetime = model.predict_lifetime(msg.current_ph, decay_rate)
                 severity = model.get_severity(lifetime)
 
@@ -345,6 +527,11 @@ def aging_process_main(input_queue: multiprocessing.Queue, output_queue: multipr
                 decay_rate = model.ph_decay_rate(
                     msg.temperature, msg.humidity, msg.current_ph
                 )
+
+                book_meta = _get_book_meta_from_db(msg.shelf_id, msg.slot_id)
+                if book_meta is not None:
+                    decay_rate = model.adjust_rate_by_book_meta(decay_rate, book_meta)
+
                 lifetime = model.predict_lifetime(msg.current_ph, decay_rate)
 
                 ph_predictions = {}

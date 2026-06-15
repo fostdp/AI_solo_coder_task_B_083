@@ -87,6 +87,28 @@
                         <div class="empty-tip">加载中...</div>
                     </div>
                 </div>
+
+                <div class="sidebar-section" id="efficacyPanel">
+                    <h4>防蠹药方效果评估</h4>
+                    <div class="empty-tip">加载中...</div>
+                    <div class="efficacy-actions">
+                        <button class="ctrl-btn" onclick="evaluateEfficacy('yuncao')">评估芸草</button>
+                        <button class="ctrl-btn" onclick="evaluateEfficacy('huangbo')">评估黄柏</button>
+                        <button class="ctrl-btn" onclick="evaluateEfficacy('yanye')">评估烟叶</button>
+                    </div>
+                </div>
+
+                <div class="sidebar-section" id="comparatorPanel">
+                    <h4>跨馆藏环境比对</h4>
+                    <div class="empty-tip">加载中...</div>
+                </div>
+
+                <div class="sidebar-section" id="spreadHotspots">
+                    <h4>传播热点预测</h4>
+                    <div class="empty-tip">
+                        <button class="ctrl-btn" onclick="runSpreadPrediction()">运行传播预测</button>
+                    </div>
+                </div>
             </aside>
 
             <main class="main-panel">
@@ -106,6 +128,7 @@
                         <div class="control-group">
                             <button id="rotateLeft" class="ctrl-btn">← 左转</button>
                             <button id="rotateRight" class="ctrl-btn">右转 →</button>
+                            <button id="toggleSpread" class="ctrl-btn" onclick="shelf3d.toggleSpreadArrows()">传播箭头</button>
                         </div>
                         <div class="legend">
                             <span class="legend-item"><span class="legend-color level-normal"></span>正常</span>

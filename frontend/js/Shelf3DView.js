@@ -6,6 +6,8 @@ class Shelf3DView {
         this.shelves = [];
         this.heatmapData = [];
         this.heatmapType = 'ph';
+        this.spreadDirections = [];
+        this.showSpreadArrows = false;
 
         this.viewAngleX = 0.6;
         this.viewAngleY = 0.3;
@@ -118,6 +120,15 @@ class Shelf3DView {
 
     setHeatmapType(type) {
         this.heatmapType = type;
+    }
+
+    setSpreadDirections(directions) {
+        this.spreadDirections = directions || [];
+    }
+
+    toggleSpreadArrows(show) {
+        this.showSpreadArrows = show !== undefined ? show : !this.showSpreadArrows;
+        this.render();
     }
 
     _checkHover(x, y) {
@@ -281,6 +292,10 @@ class Shelf3DView {
         }
 
         this._drawHeatmapSlots();
+
+        if (this.showSpreadArrows && this.spreadDirections.length > 0) {
+            this._drawSpreadArrows();
+        }
 
         if (this.hoveredSlot) {
             this._drawHoverTooltip();
@@ -659,6 +674,62 @@ class Shelf3DView {
     }
 
     _drawSelectedHighlight() {
+    }
+
+    _getShelfCenter(shelfId) {
+        const idx = this.shelves.findIndex(s => s.shelf_id === shelfId);
+        if (idx < 0) return null;
+        const row = Math.floor(idx / 2);
+        const col = idx % 2;
+        const x = (col - 0.5) * (100 + 80);
+        const y = 0;
+        const z = (row - 1.5) * (30 + 60);
+        return this._project(x, y - 90, z);
+    }
+
+    _drawSpreadArrows() {
+        const ctx = this.ctx;
+
+        this.spreadDirections.forEach(dir => {
+            const fromPos = this._getShelfCenter(dir[0]);
+            const toPos = this._getShelfCenter(dir[1]);
+            if (!fromPos || !toPos) return;
+
+            const weight = dir[2] || 0.5;
+            const alpha = Math.min(0.9, weight * 0.8 + 0.2);
+            const lineWidth = Math.max(1.5, weight * 4);
+
+            ctx.strokeStyle = `rgba(255, 50, 50, ${alpha})`;
+            ctx.lineWidth = lineWidth;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(fromPos.x, fromPos.y);
+            ctx.lineTo(toPos.x, toPos.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            const dx = toPos.x - fromPos.x;
+            const dy = toPos.y - fromPos.y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len < 5) return;
+
+            const ndx = dx / len;
+            const ndy = dy / len;
+
+            const arrowLen = 10 + weight * 6;
+            const arrowWidth = 5 + weight * 3;
+
+            const tipX = toPos.x - ndx * 5;
+            const tipY = toPos.y - ndy * 5;
+
+            ctx.fillStyle = `rgba(255, 50, 50, ${alpha})`;
+            ctx.beginPath();
+            ctx.moveTo(tipX, tipY);
+            ctx.lineTo(tipX - ndx * arrowLen + ndy * arrowWidth, tipY - ndy * arrowLen - ndx * arrowWidth);
+            ctx.lineTo(tipX - ndx * arrowLen - ndy * arrowWidth, tipY - ndy * arrowLen + ndx * arrowWidth);
+            ctx.closePath();
+            ctx.fill();
+        });
     }
 
     zoomIn() {

@@ -405,7 +405,8 @@ class AlertManager:
             "ph_low": "pH值偏低",
             "mold_spore_high": "霉菌孢子浓度高",
             "light_high": "光照强度超标",
-            "active_mold": "活性霉菌检测"
+            "active_mold": "活性霉菌检测",
+            "cross_library_anomaly": "跨馆藏环境异常"
         }
         return type_map.get(alert_type, alert_type)
 

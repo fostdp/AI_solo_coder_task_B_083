@@ -30,11 +30,19 @@ logger = logging.getLogger(__name__)
 class SensorSimulator:
     """传感器模拟器"""
 
+    PRESCRIPTION_EFFECTS = {
+        "yuncao": (0.3, 0.5),
+        "huangbo": (0.4, 0.6),
+        "yanye": (0.2, 0.4),
+        "none": (0.0, 0.0),
+    }
+
     def __init__(self, broker: str = "localhost", port: int = 1883,
                  username: str = "", password: str = "",
                  total_sensors: int = 70, ph_ratio: float = 0.3,
                  interval: int = 300, extreme_mode: bool = False,
-                 drift_enabled: bool = True, drift_rate: float = 0.001):
+                 drift_enabled: bool = True, drift_rate: float = 0.001,
+                 prescription: str = "none"):
         self.broker = broker
         self.port = port
         self.username = username
@@ -46,6 +54,7 @@ class SensorSimulator:
         self.extreme_mode = extreme_mode
         self.drift_enabled = drift_enabled
         self.drift_rate = drift_rate
+        self.active_prescription = prescription
 
         self.client = None
         self.connected = False
@@ -244,6 +253,28 @@ class SensorSimulator:
         state["humid_drift"] = drift_amount * 0.5
         state["base_mold"] = 30 + elapsed_hours * 0.01 * sensor["drift_offset"]
 
+    def _apply_prescription_effect(self, spore_value: float, prescription: str = None) -> float:
+        """
+        应用处方药效，降低霉菌孢子浓度
+        
+        Args:
+            spore_value: 原始孢子浓度
+            prescription: 处方名称，默认使用self.active_prescription
+        
+        Returns:
+            降低后的孢子浓度
+        """
+        if prescription is None:
+            prescription = self.active_prescription
+
+        if prescription == "none" or prescription not in self.PRESCRIPTION_EFFECTS:
+            return spore_value
+
+        min_reduction, max_reduction = self.PRESCRIPTION_EFFECTS[prescription]
+        reduction_ratio = random.uniform(min_reduction, max_reduction)
+
+        return spore_value * (1.0 - reduction_ratio)
+
     def _calculate_env_values(self, sensor: Dict, timestamp: float) -> Dict:
         """计算环境传感器当前值"""
         state = self.env_states[sensor["sensor_id"]]
@@ -278,6 +309,25 @@ class SensorSimulator:
             if 0.6 < cycle_pos < 0.7:
                 temperature -= random.uniform(5, 10)
                 humidity -= random.uniform(10, 20)
+
+        if self.active_prescription and self.active_prescription != "none":
+            if self.active_prescription == "all":
+                shelf_id = sensor["shelf_id"]
+                shelf_num = int(shelf_id.split("-")[1])
+                if shelf_num in (1, 2):
+                    effective_prescription = "none"
+                elif shelf_num in (3, 4):
+                    effective_prescription = "yuncao"
+                elif shelf_num in (5, 6):
+                    effective_prescription = "huangbo"
+                elif shelf_num in (7, 8):
+                    effective_prescription = "yanye"
+                else:
+                    effective_prescription = "none"
+                mold_spore = self._apply_prescription_effect(mold_spore, effective_prescription)
+            else:
+                mold_spore = self._apply_prescription_effect(mold_spore)
+            mold_spore = max(1.0, mold_spore)
 
         return {
             "temperature": round(temperature, 2),
@@ -378,6 +428,7 @@ class SensorSimulator:
         logger.info(f"上报间隔: {self.interval}秒")
         logger.info(f"极端模式: {'开启' if self.extreme_mode else '关闭'}")
         logger.info(f"老化漂移: {'开启' if self.drift_enabled else '关闭'} (速率: {self.drift_rate})")
+        logger.info(f"处方药效: {self.active_prescription if self.active_prescription != 'none' else '关闭'}")
         logger.info(f"MQTT Broker: {self.broker}:{self.port}")
 
         if not self.connect():
@@ -485,6 +536,10 @@ class SensorSimulator:
         print(f"老化漂移: {'开启' if self.drift_enabled else '关闭'}")
         if self.drift_enabled:
             print(f"漂移速率: {self.drift_rate}")
+        print(f"处方药效: {self.active_prescription if self.active_prescription != 'none' else '关闭'}")
+        if self.active_prescription != "none" and self.active_prescription in self.PRESCRIPTION_EFFECTS:
+            min_r, max_r = self.PRESCRIPTION_EFFECTS[self.active_prescription]
+            print(f"  减少率范围: {min_r:.0%}-{max_r:.0%}")
         print(f"MQTT Broker: {self.broker}:{self.port}")
         print(f"\n书架数量: {len(self.shelves)}")
         print(f"总格口数: {sum(len(s['slots']) for s in self.shelves)}")
@@ -529,6 +584,10 @@ def main():
     parser.add_argument("--history", type=int, default=0, help="生成历史数据天数")
     parser.add_argument("--output", default="", help="历史数据输出文件")
     parser.add_argument("--summary", action="store_true", help="显示配置摘要")
+    parser.add_argument("--prescription",
+                        choices=["none", "yuncao", "huangbo", "yanye", "all"],
+                        default="none",
+                        help="启用处方药效模拟 (none/yuncao/huangbo/yanye/all)")
 
     args = parser.parse_args()
 
@@ -542,7 +601,8 @@ def main():
         interval=args.interval,
         extreme_mode=args.extreme,
         drift_enabled=not args.no_drift,
-        drift_rate=args.drift_rate
+        drift_rate=args.drift_rate,
+        prescription=args.prescription
     )
 
     if args.summary:
