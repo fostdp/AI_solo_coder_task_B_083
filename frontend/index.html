@@ -1,160 +1,260 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>古籍微环境监测与病害预测系统</title>
-<script src="https://d3js.org/d3.v7.min.js"></script>
-<link rel="stylesheet" href="css/app.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代医学文献馆藏微环境监测与古籍病害预测系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="header-left">
+                <h1>古籍馆藏微环境监测系统</h1>
+                <span class="subtitle">古代医学文献保护 · 智能病害预测</span>
+            </div>
+            <div class="header-right">
+                <div class="status-indicators">
+                    <div class="status-item">
+                        <span class="status-dot status-online"></span>
+                        <span>系统在线</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-dot status-db"></span>
+                        <span>数据库正常</span>
+                    </div>
+                </div>
+                <div class="current-time" id="currentTime"></div>
+            </div>
+        </header>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="logo">📜</span>
-    <div>
-      <div class="title">古代医学文献馆藏微环境监测与古籍病害预测系统</div>
-      <div class="subtitle">Ancient Medical Literature Micro-Environment Monitor</div>
+        <div class="main-content">
+            <aside class="sidebar">
+                <div class="sidebar-section">
+                    <h3>概览统计</h3>
+                    <div class="stat-cards">
+                        <div class="stat-card stat-blue">
+                            <div class="stat-value" id="totalBooks">-</div>
+                            <div class="stat-label">馆藏古籍</div>
+                        </div>
+                        <div class="stat-card stat-green">
+                            <div class="stat-value" id="totalShelves">-</div>
+                            <div class="stat-label">书架数量</div>
+                        </div>
+                        <div class="stat-card stat-yellow">
+                            <div class="stat-value" id="warningCount">-</div>
+                            <div class="stat-label">预警格口</div>
+                        </div>
+                        <div class="stat-card stat-red">
+                            <div class="stat-value" id="dangerCount">-</div>
+                            <div class="stat-label">危险格口</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3>热力图类型</h3>
+                    <div class="heatmap-types">
+                        <button class="heatmap-btn active" data-type="ph">
+                            <span class="type-dot type-ph"></span>
+                            pH值分布
+                        </button>
+                        <button class="heatmap-btn" data-type="mold">
+                            <span class="type-dot type-mold"></span>
+                            霉菌分布
+                        </button>
+                        <button class="heatmap-btn" data-type="acidification">
+                            <span class="type-dot type-acid"></span>
+                            酸化风险
+                        </button>
+                        <button class="heatmap-btn" data-type="insect">
+                            <span class="type-dot type-insect"></span>
+                            虫蛀风险
+                        </button>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3>书架导航</h3>
+                    <div class="shelf-nav" id="shelfNav">
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3>近期告警</h3>
+                    <div class="alert-list" id="alertList">
+                        <div class="empty-tip">加载中...</div>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="main-panel">
+                <div class="view-tabs">
+                    <button class="tab-btn active" data-view="3d">三维书架视图</button>
+                    <button class="tab-btn" data-view="plan">平面布局图</button>
+                </div>
+
+                <div class="shelf-view-container">
+                    <canvas id="shelfCanvas" class="shelf-canvas"></canvas>
+                    <div class="canvas-controls">
+                        <div class="control-group">
+                            <button id="zoomIn" class="ctrl-btn">放大 +</button>
+                            <button id="zoomOut" class="ctrl-btn">缩小 -</button>
+                            <button id="resetView" class="ctrl-btn">重置视图</button>
+                        </div>
+                        <div class="control-group">
+                            <button id="rotateLeft" class="ctrl-btn">← 左转</button>
+                            <button id="rotateRight" class="ctrl-btn">右转 →</button>
+                        </div>
+                        <div class="legend">
+                            <span class="legend-item"><span class="legend-color level-normal"></span>正常</span>
+                            <span class="legend-item"><span class="legend-color level-warning"></span>预警</span>
+                            <span class="legend-item"><span class="legend-color level-danger"></span>危险</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detail-panel" id="detailPanel" style="display:none;">
+                    <div class="detail-header">
+                        <h3 id="detailTitle">格口详情</h3>
+                        <button class="close-btn" onclick="closeDetail()">×</button>
+                    </div>
+                    <div class="detail-content">
+                        <div class="detail-tabs">
+                            <button class="detail-tab active" data-tab="env">环境趋势</button>
+                            <button class="detail-tab" data-tab="ph">pH值趋势</button>
+                            <button class="detail-tab" data-tab="prediction">老化预测</button>
+                            <button class="detail-tab" data-tab="knowledge">防治知识</button>
+                        </div>
+
+                        <div class="detail-tab-content">
+                            <div class="tab-pane active" id="tab-env">
+                                <div class="chart-container">
+                                    <h4>近3个月温湿度与环境参数趋势</h4>
+                                    <div id="envChart" class="chart"></div>
+                                </div>
+                                <div class="env-summary">
+                                    <div class="env-item">
+                                        <span class="env-label">当前温度</span>
+                                        <span class="env-value" id="currentTemp">-</span>
+                                    </div>
+                                    <div class="env-item">
+                                        <span class="env-label">当前湿度</span>
+                                        <span class="env-value" id="currentHumid">-</span>
+                                    </div>
+                                    <div class="env-item">
+                                        <span class="env-label">霉菌孢子</span>
+                                        <span class="env-value" id="currentMold">-</span>
+                                    </div>
+                                    <div class="env-item">
+                                        <span class="env-label">VOC</span>
+                                        <span class="env-value" id="currentVoc">-</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="tab-pane" id="tab-ph">
+                                <div class="chart-container">
+                                    <h4>近3个月pH值变化趋势</h4>
+                                    <div id="phChart" class="chart"></div>
+                                </div>
+                                <div class="ph-info">
+                                    <div class="ph-item">
+                                        <span class="ph-label">当前pH值</span>
+                                        <span class="ph-value" id="currentPh">-</span>
+                                    </div>
+                                    <div class="ph-item">
+                                        <span class="ph-label">酸化速率</span>
+                                        <span class="ph-value" id="agingRate">-</span>
+                                    </div>
+                                    <div class="ph-item">
+                                        <span class="ph-label">预测寿命</span>
+                                        <span class="ph-value" id="predictedLifetime">-</span>
+                                    </div>
+                                    <div class="ph-item">
+                                        <span class="ph-label">老化程度</span>
+                                        <span class="ph-value" id="agingSeverity">-</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="tab-pane" id="tab-prediction">
+                                <div class="prediction-section">
+                                    <h4>纸张老化预测 (Arrhenius模型)</h4>
+                                    <div id="predictionChart" class="chart"></div>
+                                </div>
+                                <div class="prediction-cards">
+                                    <div class="pred-card pred-30">
+                                        <div class="pred-title">30天后</div>
+                                        <div class="pred-value" id="pred30">-</div>
+                                        <div class="pred-desc">pH值预测</div>
+                                    </div>
+                                    <div class="pred-card pred-90">
+                                        <div class="pred-title">90天后</div>
+                                        <div class="pred-value" id="pred90">-</div>
+                                        <div class="pred-desc">pH值预测</div>
+                                    </div>
+                                    <div class="pred-card pred-180">
+                                        <div class="pred-title">180天后</div>
+                                        <div class="pred-value" id="pred180">-</div>
+                                        <div class="pred-desc">pH值预测</div>
+                                    </div>
+                                </div>
+                                <div class="mold-section">
+                                    <h4>霉菌生长风险</h4>
+                                    <div id="moldRiskChart" class="chart"></div>
+                                </div>
+                            </div>
+
+                            <div class="tab-pane" id="tab-knowledge">
+                                <div class="risk-assessment">
+                                    <h4>病害风险评估</h4>
+                                    <div class="risk-score" id="riskScore">-</div>
+                                    <div class="risk-level" id="riskLevel">-</div>
+                                    <div class="risk-types" id="riskTypes"></div>
+                                </div>
+
+                                <div class="knowledge-section">
+                                    <h4>古代防治药方推荐</h4>
+                                    <div id="herbRecommendations" class="herb-list">
+                                    </div>
+                                </div>
+
+                                <div class="prescriptions-section">
+                                    <h4>传统防治方法</h4>
+                                    <div id="prescriptions" class="prescription-list">
+                                    </div>
+                                </div>
+
+                                <div class="tips-section">
+                                    <h4>防护建议</h4>
+                                    <ul id="preventionTips" class="tips-list">
+                                    </ul>
+                                </div>
+
+                                <div class="references-section">
+                                    <h4>参考古籍</h4>
+                                    <div id="references" class="reference-list">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="book-info">
+                            <h4>馆藏古籍</h4>
+                            <div id="bookList" class="book-list">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
     </div>
-  </div>
-  <div class="stats" id="overviewStats">
-    <div class="stat"><span class="k">馆藏总量</span><span class="v">—</span></div>
-    <div class="stat"><span class="k">平均温度</span><span class="v">—</span></div>
-    <div class="stat"><span class="k">平均湿度</span><span class="v">—</span></div>
-    <div class="stat"><span class="k">平均pH</span><span class="v">—</span></div>
-    <div class="stat"><span class="k">霉菌孢子</span><span class="v">—</span></div>
-    <div class="stat alerts"><span class="k">告警</span><span class="v"><em class="r">0</em><em class="o">0</em><em class="y">0</em></span></div>
-  </div>
-  <div class="top-actions">
-    <button id="refreshBtn" class="btn">🔄 刷新</button>
-    <button id="autoRefreshBtn" class="btn toggle active">⏱ 自动刷新</button>
-  </div>
-</header>
 
-<main class="layout">
-  <aside class="sidebar">
-    <div class="side-title">🗄 藏书架</div>
-    <ul class="shelf-list" id="shelfList"></ul>
-
-    <div class="side-title mt24">🎛 热力图层</div>
-    <div class="layer-toggles">
-      <label class="tg"><input type="checkbox" checked data-layer="acidosis" /><span class="dot acidosis"></span>酸化</label>
-      <label class="tg"><input type="checkbox" checked data-layer="mold" /><span class="dot mold"></span>霉变</label>
-      <label class="tg"><input type="checkbox" checked data-layer="insect" /><span class="dot insect"></span>虫蛀</label>
-    </div>
-
-    <div class="side-title mt24">🚨 最近告警</div>
-    <div class="alerts-list" id="alertsList"><div class="empty">暂无告警</div></div>
-  </aside>
-
-  <section class="shelf-area">
-    <div class="area-header">
-      <div>
-        <div class="area-title" id="currentShelfTitle">选择书架开始监测</div>
-        <div class="area-sub" id="currentShelfDesc">—</div>
-      </div>
-      <div class="view-controls">
-        <button class="btn sm" id="resetViewBtn">🎯 复位视角</button>
-        <button class="btn sm" id="zoomInBtn">➕</button>
-        <button class="btn sm" id="zoomOutBtn">➖</button>
-      </div>
-    </div>
-    <div class="canvas-wrap">
-      <canvas id="shelfCanvas"></canvas>
-      <div class="corner-hint">
-        <div>🖱 拖拽旋转 · 滚轮缩放 · 点击格口查看详情</div>
-      </div>
-    </div>
-    <div class="shelf-legend">
-      <div class="lg-row">
-        <span class="lg safe">安全</span>
-        <span class="lg low">轻微</span>
-        <span class="lg md">中等</span>
-        <span class="lg hi">严重</span>
-        <span class="lg tip">格口颜色按病害类型叠加，圆徽为综合风险等级</span>
-      </div>
-    </div>
-  </section>
-
-  <section class="detail-area" id="detailArea">
-    <div class="empty-state" id="emptyDetail">
-      <div class="big">🔍</div>
-      <div class="hint">点击左侧书架选择书架，再点击三维模型中的格口查看：<br/>📈 近3个月微环境趋势<br/>🧪 纸张老化速率预测（Arrhenius动力学模型）<br/>🌿 病害关联的古代防蠹药方推荐</div>
-    </div>
-
-    <div class="detail-wrap hidden" id="detailContent">
-      <div class="slot-header">
-        <div>
-          <div class="slot-id" id="slotId">—</div>
-          <div class="slot-meta" id="slotMeta">—</div>
-        </div>
-        <div class="risk-pill" id="riskPill">—</div>
-      </div>
-
-      <div class="metric-grid">
-        <div class="metric-card temp">
-          <div class="lbl">温度</div>
-          <div class="val" id="mTemp">—<span class="u">℃</span></div>
-        </div>
-        <div class="metric-card humi">
-          <div class="lbl">相对湿度</div>
-          <div class="val" id="mHumi">—<span class="u">%</span></div>
-        </div>
-        <div class="metric-card ph">
-          <div class="lbl">pH值</div>
-          <div class="val" id="mPh">—</div>
-          <div class="tr" id="mPhTrend">—</div>
-        </div>
-        <div class="metric-card mold">
-          <div class="lbl">霉菌孢子</div>
-          <div class="val" id="mMold">—<span class="u">CFU/m³</span></div>
-        </div>
-        <div class="metric-card light">
-          <div class="lbl">光照</div>
-          <div class="val" id="mLight">—<span class="u">lux</span></div>
-        </div>
-        <div class="metric-card life">
-          <div class="lbl">预期寿命</div>
-          <div class="val" id="mLife">—<span class="u">年</span></div>
-        </div>
-      </div>
-
-      <div class="tab-bar" id="tabBar">
-        <button class="tab active" data-tab="env">📊 微环境趋势 (90天)</button>
-        <button class="tab" data-tab="age">🧪 纸张老化预测</button>
-        <button class="tab" data-tab="herb">🌿 古籍药方推荐</button>
-      </div>
-
-      <div class="tab-panel" id="tab-env">
-        <div class="chart-card"><div class="chart-title">🌡 温度趋势</div><div class="chart" id="chartTemp"></div></div>
-        <div class="chart-card"><div class="chart-title">💧 相对湿度趋势</div><div class="chart" id="chartHumi"></div></div>
-        <div class="chart-card"><div class="chart-title">🍄 霉菌孢子浓度</div><div class="chart" id="chartMold"></div></div>
-        <div class="chart-card"><div class="chart-title">☀ 光照强度</div><div class="chart" id="chartLight"></div></div>
-      </div>
-
-      <div class="tab-panel hidden" id="tab-age">
-        <div class="chart-card"><div class="chart-title">📉 pH值下降曲线（Arrhenius方程动力学预测）</div>
-          <div class="chart" id="chartPhAge" style="height:280px;"></div>
-        </div>
-        <div class="chart-card"><div class="chart-title">📚 历史pH实测</div>
-          <div class="chart" id="chartPhHistory" style="height:200px;"></div>
-        </div>
-        <div class="kpi-row" id="kpiRow"></div>
-      </div>
-
-      <div class="tab-panel hidden" id="tab-herb">
-        <div class="prescription-card" id="prescriptionCard"></div>
-        <div class="herb-list" id="herbList"></div>
-      </div>
-
-    </div>
-  </section>
-</main>
-
-<div id="toast" class="toast hidden"></div>
-
-<script src="js/shelf3d.js"></script>
-<script src="js/trends.js"></script>
-<script src="js/app.js"></script>
+    <script src="js/shelf3d.js"></script>
+    <script src="js/heatmap.js"></script>
+    <script src="js/trendChart.js"></script>
+    <script src="js/app.js"></script>
 </body>
 </html>

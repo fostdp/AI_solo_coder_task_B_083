@@ -1,278 +1,168 @@
-CREATE DATABASE IF NOT EXISTS ancient_book_monitor;
+CREATE DATABASE IF NOT EXISTS ancient_medical_books
+    COMMENT '古代医学文献馆藏微环境监测数据库';
 
-USE ancient_book_monitor;
+USE ancient_medical_books;
 
-DROP TABLE IF EXISTS env_sensor_data;
-CREATE TABLE env_sensor_data (
-    timestamp     DateTime64(3) DEFAULT now64(3),
-    sensor_id     String,
-    shelf_id      String,
-    slot_id       String,
-    temperature   Float32 DEFAULT 22.0,
-    humidity      Float32 DEFAULT 50.0,
-    light_lux     Float32 DEFAULT 0.0,
-    voc_ppm       Float32 DEFAULT 0.0,
-    mold_spores   Float32 DEFAULT 0.0,
-    active_mold   UInt8 DEFAULT 0,
-    rssi          Int16 DEFAULT -60
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(timestamp)
-ORDER BY (shelf_id, slot_id, timestamp)
-TTL timestamp + INTERVAL 3 YEAR
-SETTINGS index_granularity = 8192;
-
-DROP TABLE IF EXISTS ph_sensor_data;
-CREATE TABLE ph_sensor_data (
-    timestamp     DateTime64(3) DEFAULT now64(3),
-    sensor_id     String,
-    shelf_id      String,
-    slot_id       String,
-    ph_value      Float32 DEFAULT 7.0,
-    paper_cond    String DEFAULT 'GOOD',
-    rssi          Int16 DEFAULT -60
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(timestamp)
-ORDER BY (slot_id, timestamp)
-TTL timestamp + INTERVAL 3 YEAR
-SETTINGS index_granularity = 8192;
-
-DROP TABLE IF EXISTS bookshelf_metadata;
-CREATE TABLE bookshelf_metadata (
-    shelf_id      String,
-    location      String DEFAULT '',
-    rows_count    UInt8 DEFAULT 6,
-    cols_count    UInt8 DEFAULT 8,
-    book_count    UInt32 DEFAULT 0,
-    description   String DEFAULT ''
-) ENGINE = ReplacingMergeTree()
-ORDER BY shelf_id;
-
-DROP TABLE IF EXISTS book_slot_metadata;
-CREATE TABLE book_slot_metadata (
-    slot_id       String,
-    shelf_id      String,
-    row_num       UInt8,
-    col_num       UInt8,
-    book_title    String DEFAULT '',
-    book_dynasty  String DEFAULT '',
-    book_type     String DEFAULT '',
-    book_count    UInt16 DEFAULT 1,
-    paper_type    String DEFAULT 'default',
-    sensor_env_id String DEFAULT '',
-    sensor_ph_id  String DEFAULT ''
-) ENGINE = ReplacingMergeTree()
-ORDER BY (shelf_id, slot_id);
-
-DROP TABLE IF EXISTS alert_events;
-CREATE TABLE alert_events (
-    event_id         String,
-    timestamp        DateTime64(3) DEFAULT now64(3),
-    alert_level      String,
-    alert_type       String,
-    shelf_id         String DEFAULT '',
-    slot_id          String DEFAULT '',
-    sensor_id        String DEFAULT '',
-    metric_name      String DEFAULT '',
-    metric_value     Float32 DEFAULT 0,
-    threshold        Float32 DEFAULT 0,
-    message          String DEFAULT '',
-    is_acknowledged  UInt8 DEFAULT 0,
-    ack_user         String DEFAULT '',
-    ack_time         Int64 DEFAULT 0
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMMDD(timestamp)
-ORDER BY (timestamp, alert_level)
-TTL timestamp + INTERVAL 1 YEAR
-SETTINGS index_granularity = 4096;
-
-DROP TABLE IF EXISTS mv_env_hourly;
-DROP VIEW IF EXISTS mv_env_hourly_view;
-CREATE TABLE mv_env_hourly (
-    shelf_id         String,
-    slot_id          String,
-    ts_hour          DateTime64(3),
-    temp_avg         Float32,
-    temp_max         Float32,
-    temp_min         Float32,
-    humi_avg         Float32,
-    humi_max         Float32,
-    humi_min         Float32,
-    light_avg        Float32,
-    light_max        Float32,
-    voc_avg          Float32,
-    mold_avg         Float32,
-    active_mold_cnt  UInt32,
-    samples          UInt32
-) ENGINE = SummingMergeTree()
-ORDER BY (shelf_id, slot_id, ts_hour);
-
-CREATE MATERIALIZED VIEW mv_env_hourly_view TO mv_env_hourly AS
-SELECT
-    shelf_id,
-    slot_id,
-    toStartOfHour(timestamp) AS ts_hour,
-    avg(temperature)   AS temp_avg,
-    max(temperature)   AS temp_max,
-    min(temperature)   AS temp_min,
-    avg(humidity)      AS humi_avg,
-    max(humidity)      AS humi_max,
-    min(humidity)      AS humi_min,
-    avg(light_lux)     AS light_avg,
-    max(light_lux)     AS light_max,
-    avg(voc_ppm)       AS voc_avg,
-    avg(mold_spores)   AS mold_avg,
-    sum(active_mold)   AS active_mold_cnt,
-    count()            AS samples
-FROM env_sensor_data
-GROUP BY shelf_id, slot_id, ts_hour;
-
-DROP TABLE IF EXISTS mv_ph_daily;
-DROP VIEW IF EXISTS mv_ph_daily_view;
-CREATE TABLE mv_ph_daily (
-    shelf_id     String,
-    slot_id      String,
-    day          Date,
-    ph_avg       Float32,
-    ph_min       Float32,
-    ph_max       Float32,
-    samples      UInt32
-) ENGINE = SummingMergeTree()
-ORDER BY (shelf_id, slot_id, day);
-
-CREATE MATERIALIZED VIEW mv_ph_daily_view TO mv_ph_daily AS
-SELECT
-    shelf_id,
-    slot_id,
-    toDate(timestamp) AS day,
-    avg(ph_value) AS ph_avg,
-    min(ph_value) AS ph_min,
-    max(ph_value) AS ph_max,
-    count()       AS samples
-FROM ph_sensor_data
-GROUP BY shelf_id, slot_id, day;
-
-DROP VIEW IF EXISTS mv_alert_auto_view;
-CREATE MATERIALIZED VIEW mv_alert_auto_view TO alert_events AS
-SELECT
-    generateUUIDv4()                                                                 AS event_id,
-    timestamp                                                                        AS timestamp,
-    multiIf(
-        ph_value < 5.5 OR active_mold = 1, 'RED',
-        ph_value < 6.0 OR light_lux > 50, 'ORANGE',
-        ph_value < 6.5 OR mold_spores > 500, 'YELLOW',
-        'OK'
-    )                                                                                AS alert_level,
-    multiIf(
-        ph_value < 5.5, 'CRITICAL_ACIDOSIS',
-        active_mold = 1, 'ACTIVE_MOLD',
-        ph_value < 6.0, 'MODERATE_ACIDOSIS',
-        light_lux > 50, 'EXCESS_LIGHT',
-        ph_value < 6.5, 'MILD_ACIDOSIS',
-        mold_spores > 500, 'HIGH_SPORE',
-        'NONE'
-    )                                                                                AS alert_type,
-    shelf_id                                                                         AS shelf_id,
-    slot_id                                                                          AS slot_id,
-    sensor_id                                                                        AS sensor_id,
-    multiIf(
-        ph_value < 6.5, 'ph_value',
-        mold_spores > 500, 'mold_spores',
-        active_mold = 1, 'active_mold',
-        light_lux > 50, 'light_lux',
-        'temperature'
-    )                                                                                AS metric_name,
-    multiIf(
-        ph_value < 6.5, ph_value,
-        mold_spores > 500, mold_spores,
-        active_mold = 1, toFloat32(active_mold),
-        light_lux > 50, light_lux,
-        temperature
-    )                                                                                AS metric_value,
-    multiIf(
-        ph_value < 5.5, toFloat32(5.5),
-        ph_value < 6.0, toFloat32(6.0),
-        ph_value < 6.5, toFloat32(6.5),
-        mold_spores > 500, toFloat32(500),
-        light_lux > 50, toFloat32(50),
-        toFloat32(0)
-    )                                                                                AS threshold,
-    multiIf(
-        ph_value < 5.5, '严重酸化：pH低于5.5，纸张纤维已严重受损',
-        active_mold = 1, '活性霉菌检测到，存在不可逆转的生物破坏风险',
-        ph_value < 6.0, '中度酸化：pH低于6.0，需立即进行脱酸处理',
-        light_lux > 50, '光照超标：超过50lux将加速纸张光降解',
-        ph_value < 6.5, '轻度酸化：pH低于6.5，建议启动预防性脱酸',
-        mold_spores > 500, '霉菌孢子浓度过高：>500 CFU/m3，存在萌发风险',
-        'OK'
-    )                                                                                AS message,
-    toUInt8(0)                                                                       AS is_acknowledged,
-    ''                                                                               AS ack_user,
-    toInt64(0)                                                                       AS ack_time
-FROM (
-    SELECT
-        e.timestamp, e.sensor_id, e.shelf_id, e.slot_id,
-        e.temperature, e.humidity, e.light_lux, e.voc_ppm, e.mold_spores, e.active_mold,
-        coalesce(p.ph_value, 6.8) AS ph_value
-    FROM env_sensor_data e
-    LEFT JOIN ph_sensor_data p ON p.slot_id = e.slot_id AND abs(toUnixTimestamp(e.timestamp) - toUnixTimestamp(p.timestamp)) < 3600
+CREATE TABLE IF NOT EXISTS env_sensor_data
+(
+    timestamp   DateTime64(3) DEFAULT now64(),
+    sensor_id   String,
+    shelf_id    String,
+    slot_id     String,
+    temperature Float64,
+    humidity    Float64,
+    light       Float64,
+    voc         Float64,
+    mold_spore  Float64,
+    sensor_type String
 )
-WHERE ph_value < 6.5 OR mold_spores > 500 OR light_lux > 50 OR active_mold = 1;
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (shelf_id, slot_id, sensor_id, timestamp)
+TTL timestamp + INTERVAL 2 YEAR
+COMMENT '环境传感器时序数据表';
 
-INSERT INTO bookshelf_metadata (shelf_id, location, rows_count, cols_count, book_count, description) VALUES
-    ('SH-A-01', 'A区一层-01', 6, 8, 4320, '明版刻本专藏区（本草类）'),
-    ('SH-A-02', 'A区一层-02', 6, 8, 4200, '明版刻本专藏区（医案类）'),
-    ('SH-A-03', 'A区一层-03', 6, 8, 4280, '明版手稿与抄本专区'),
-    ('SH-B-01', 'B区二层-01', 6, 8, 4250, '清版官修医书专藏（医宗金鉴等）'),
-    ('SH-B-02', 'B区二层-02', 6, 8, 4310, '清版家刻本与秘方专藏'),
-    ('SH-C-01', 'C区善本室-01', 6, 8, 4400, '宋元残卷·善本孤本区（恒温恒湿）'),
-    ('SH-C-02', 'C区善本室-02', 6, 8, 4240, '宫廷医案·御药房档案专区');
+CREATE TABLE IF NOT EXISTS ph_sensor_data
+(
+    timestamp   DateTime64(3) DEFAULT now64(),
+    sensor_id   String,
+    shelf_id    String,
+    slot_id     String,
+    ph_value    Float64,
+    sensor_type String
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (shelf_id, slot_id, sensor_id, timestamp)
+TTL timestamp + INTERVAL 2 YEAR
+COMMENT '纸张pH值检测时序数据表';
 
-INSERT INTO book_slot_metadata (slot_id, shelf_id, row_num, col_num, book_title, book_dynasty, book_type, book_count, paper_type, sensor_env_id, sensor_ph_id) VALUES
-('SH-A-01-R01-C01','SH-A-01',1,1,'本草纲目','明','刻本',12,'bamboo','ENV-001','PH-001'),
-('SH-A-01-R01-C02','SH-A-01',1,2,'本草纲目','明','刻本',10,'bamboo','ENV-001','PH-001'),
-('SH-A-01-R01-C03','SH-A-01',1,3,'证类本草','明','刻本',8,'bamboo','ENV-002','PH-002'),
-('SH-A-01-R01-C04','SH-A-01',1,4,'本草经疏','明','刻本',9,'xuan','ENV-002','PH-002'),
-('SH-A-01-R01-C05','SH-A-01',1,5,'景岳全书','明','刻本',14,'bamboo','ENV-003','PH-003'),
-('SH-A-01-R01-C06','SH-A-01',1,6,'景岳全书','明','刻本',12,'bamboo','ENV-003','PH-003'),
-('SH-A-01-R01-C07','SH-A-01',1,7,'医学纲目','明','刻本',10,'xuan','ENV-004','PH-004'),
-('SH-A-01-R01-C08','SH-A-01',1,8,'赤水玄珠','明','刻本',8,'bamboo','ENV-004','PH-004'),
-('SH-A-01-R02-C01','SH-A-01',2,1,'伤寒论','明','刻本',6,'xuan','ENV-005','PH-005'),
-('SH-A-01-R02-C02','SH-A-01',2,2,'金匮要略','明','刻本',5,'xuan','ENV-005','PH-005'),
-('SH-A-01-R02-C03','SH-A-01',2,3,'黄帝内经素问','明','刻本',7,'bamboo','ENV-006','PH-006'),
-('SH-A-01-R02-C04','SH-A-01',2,4,'黄帝内经灵枢','明','刻本',6,'bamboo','ENV-006','PH-006'),
-('SH-A-01-R02-C05','SH-A-01',2,5,'难经本义','明','刻本',4,'xuan','ENV-007','PH-007'),
-('SH-A-01-R02-C06','SH-A-01',2,6,'针灸甲乙经','明','刻本',5,'bamboo','ENV-007','PH-007'),
-('SH-A-01-R02-C07','SH-A-01',2,7,'脉经','明','刻本',4,'bamboo','ENV-008','PH-008'),
-('SH-A-01-R02-C08','SH-A-01',2,8,'奇经八脉考','明','刻本',3,'xuan','ENV-008','PH-008'),
-('SH-A-01-R03-C01','SH-A-01',3,1,'千金要方','明','刻本',12,'bamboo','ENV-009','PH-009'),
-('SH-A-01-R03-C02','SH-A-01',3,2,'千金翼方','明','刻本',10,'bamboo','ENV-009','PH-009'),
-('SH-A-01-R03-C03','SH-A-01',3,3,'外台秘要','明','刻本',11,'bamboo','ENV-010','PH-010'),
-('SH-A-01-R03-C04','SH-A-01',3,4,'太平惠民和剂局方','明','刻本',7,'xuan','ENV-010','PH-010'),
-('SH-A-01-R03-C05','SH-A-01',3,5,'圣济总录','明','刻本',16,'bamboo','ENV-011','PH-011'),
-('SH-A-01-R03-C06','SH-A-01',3,6,'三因极一病证方论','明','刻本',6,'xuan','ENV-011','PH-011'),
-('SH-A-01-R03-C07','SH-A-01',3,7,'儒门事亲','明','刻本',5,'bamboo','ENV-012','PH-012'),
-('SH-A-01-R03-C08','SH-A-01',3,8,'河间六书','明','刻本',8,'bamboo','ENV-012','PH-012'),
-('SH-A-01-R04-C01','SH-A-01',4,1,'脾胃论','明','刻本',4,'xuan','ENV-013','PH-013'),
-('SH-A-01-R04-C02','SH-A-01',4,2,'兰室秘藏','明','刻本',3,'xuan','ENV-013','PH-013'),
-('SH-A-01-R04-C03','SH-A-01',4,3,'格致余论','明','刻本',3,'bamboo','ENV-014','PH-014'),
-('SH-A-01-R04-C04','SH-A-01',4,4,'丹溪心法','明','刻本',6,'bamboo','ENV-014','PH-014'),
-('SH-A-01-R04-C05','SH-A-01',4,5,'东垣试效方','明','刻本',5,'xuan','ENV-015','PH-015'),
-('SH-A-01-R04-C06','SH-A-01',4,6,'医经溯洄集','明','刻本',3,'bamboo','ENV-015','PH-015'),
-('SH-A-01-R04-C07','SH-A-01',4,7,'薛氏医案','明','医案',9,'bamboo','ENV-016','PH-016'),
-('SH-A-01-R04-C08','SH-A-01',4,8,'名医类案','明','医案',10,'bamboo','ENV-016','PH-016'),
-('SH-A-01-R05-C01','SH-A-01',5,1,'外科正宗','明','刻本',6,'bamboo','ENV-017','PH-017'),
-('SH-A-01-R05-C02','SH-A-01',5,2,'外科发挥','明','刻本',4,'xuan','ENV-017','PH-017'),
-('SH-A-01-R05-C03','SH-A-01',5,3,'妇人良方','明','刻本',8,'bamboo','ENV-018','PH-018'),
-('SH-A-01-R05-C04','SH-A-01',5,4,'女科证治准绳','明','刻本',7,'xuan','ENV-018','PH-018'),
-('SH-A-01-R05-C05','SH-A-01',5,5,'幼科证治准绳','明','刻本',6,'bamboo','ENV-019','PH-019'),
-('SH-A-01-R05-C06','SH-A-01',5,6,'证治准绳','明','刻本',14,'bamboo','ENV-019','PH-019'),
-('SH-A-01-R05-C07','SH-A-01',5,7,'审视瑶函','明','刻本',5,'xuan','ENV-020','PH-020'),
-('SH-A-01-R05-C08','SH-A-01',5,8,'口齿类要','明','刻本',3,'bamboo','ENV-020','PH-020'),
-('SH-A-01-R06-C01','SH-A-01',6,1,'瘟疫论','明','刻本',4,'bamboo','ENV-021','PH-001'),
-('SH-A-01-R06-C02','SH-A-01',6,2,'温疫论补注','明','刻本',3,'xuan','ENV-021','PH-001'),
-('SH-A-01-R06-C03','SH-A-01',6,3,'广瘟疫论','明','刻本',3,'bamboo','ENV-022','PH-002'),
-('SH-A-01-R06-C04','SH-A-01',6,4,'温热暑疫全书','明','刻本',5,'bamboo','ENV-022','PH-002'),
-('SH-A-01-R06-C05','SH-A-01',6,5,'素问玄机原病式','明','刻本',4,'xuan','ENV-023','PH-003'),
-('SH-A-01-R06-C06','SH-A-01',6,6,'宣明论方','明','刻本',5,'bamboo','ENV-023','PH-003'),
-('SH-A-01-R06-C07','SH-A-01',6,7,'伤寒六书','明','刻本',6,'bamboo','ENV-024','PH-004'),
-('SH-A-01-R06-C08','SH-A-01',6,8,'伤寒准绳','明','刻本',7,'xuan','ENV-024','PH-004');
+CREATE TABLE IF NOT EXISTS books_info
+(
+    book_id        String,
+    shelf_id       String,
+    slot_id        String,
+    title          String,
+    dynasty        String,
+    author         String,
+    category       String,
+    material       String,
+    publication_year Int32,
+    condition      String,
+    create_time    DateTime DEFAULT now(),
+    update_time    DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (shelf_id, slot_id, book_id)
+COMMENT '古籍基本信息表';
+
+CREATE TABLE IF NOT EXISTS alerts
+(
+    alert_id    String,
+    timestamp   DateTime64(3) DEFAULT now64(),
+    shelf_id    String,
+    slot_id     String,
+    alert_level String,
+    alert_type  String,
+    alert_value Float64,
+    threshold   Float64,
+    message     String,
+    is_handled  UInt8 DEFAULT 0,
+    handle_time DateTime64(3)
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (alert_level, timestamp)
+TTL timestamp + INTERVAL 1 YEAR
+COMMENT '告警记录表';
+
+CREATE TABLE IF NOT EXISTS aging_prediction
+(
+    prediction_date Date,
+    shelf_id        String,
+    slot_id         String,
+    ph_30d          Float64,
+    ph_90d          Float64,
+    ph_180d         Float64,
+    aging_rate      Float64,
+    mold_risk       Float64,
+    model_version   String DEFAULT 'v1.0'
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(prediction_date)
+ORDER BY (prediction_date, shelf_id, slot_id)
+TTL prediction_date + INTERVAL 6 MONTH
+COMMENT '纸张老化预测表';
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS env_hourly_mv
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(hour_start)
+ORDER BY (shelf_id, slot_id, hour_start)
+AS
+SELECT
+    toStartOfHour(timestamp) AS hour_start,
+    shelf_id,
+    slot_id,
+    avg(temperature)    AS avg_temperature,
+    max(temperature)    AS max_temperature,
+    min(temperature)    AS min_temperature,
+    avg(humidity)       AS avg_humidity,
+    max(humidity)       AS max_humidity,
+    min(humidity)       AS min_humidity,
+    avg(light)          AS avg_light,
+    avg(voc)            AS avg_voc,
+    avg(mold_spore)     AS avg_mold_spore,
+    count()             AS sample_count
+FROM env_sensor_data
+GROUP BY hour_start, shelf_id, slot_id;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS ph_daily_mv
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(day_start)
+ORDER BY (shelf_id, slot_id, day_start)
+AS
+SELECT
+    toStartOfDay(timestamp) AS day_start,
+    shelf_id,
+    slot_id,
+    avg(ph_value)       AS avg_ph,
+    max(ph_value)       AS max_ph,
+    min(ph_value)       AS min_ph,
+    count()             AS sample_count
+FROM ph_sensor_data
+GROUP BY day_start, shelf_id, slot_id;
+
+CREATE TABLE IF NOT EXISTS disease_knowledge_graph
+(
+    disease_type    String,
+    disease_name    String,
+    description     String,
+    herbs           Array(String),
+    prescriptions   Array(String),
+    references      Array(String),
+    create_time     DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY disease_type
+COMMENT '古籍病害与药方知识图谱';
+
+INSERT INTO disease_knowledge_graph (disease_type, disease_name, description, herbs, prescriptions, references) VALUES
+('acidification', '纸张酸化', '纸张因环境因素导致pH值下降，引起纸张脆化变黄', ['黄柏', '石灰', '碳酸钙'], ['黄柏染纸法', '石灰水脱酸法'], ['《天工开物》', '《纸墨笺》']),
+('mold', '霉变', '霉菌在纸张表面生长，导致纸张污损、强度下降', ['芸草', '樟脑', '苍术', '艾叶'], ['芸香避蠹法', '苍术熏库法'], ['《梦溪笔谈》', '《本草纲目》']),
+('insect', '虫蛀', '蛀虫啃食纸张，造成孔洞和缺损', ['芸草', '雄黄', '雌黄', '苦楝'], ['芸草藏书法', '雄黄熏书法', '苦楝纸法'], ['《齐民要术》', '《本草纲目》', '《藏书纪要》']),
+('light_damage', '光照老化', '光照导致纸张纤维素降解、褪色', ['槐花', '五倍子', '皂角'], ['槐花染纸防光法', '五倍子固色法'], ['《天工开物》', '《装潢志》']),
+('humidity_damage', '潮湿损伤', '高湿导致纸张变形、粘连、滋生霉菌', ['石灰', '木炭', '皂角'], ['石灰除湿法', '木炭吸潮法'], ['《便民图纂》', '《多能鄙事》']);
+
+INSERT INTO books_info (book_id, shelf_id, slot_id, title, dynasty, author, category, material, publication_year, condition) VALUES
+('BK001', 'SHELF-01', 'SLOT-A1', '本草纲目（明万历刻本）', '明', '李时珍', '本草', '竹纸', 1596, '良好'),
+('BK002', 'SHELF-01', 'SLOT-A2', '黄帝内经素问（明嘉靖版）', '明', '佚名', '医经', '棉纸', 1547, '轻微酸化'),
+('BK003', 'SHELF-01', 'SLOT-B1', '伤寒论（清康熙刻本）', '清', '张仲景', '伤寒', '竹纸', 1683, '良好'),
+('BK004', 'SHELF-01', 'SLOT-B2', '金匮要略（清乾隆版）', '清', '张仲景', '伤寒', '棉纸', 1742, '良好'),
+('BK005', 'SHELF-02', 'SLOT-A1', '千金要方（明万历刻本）', '明', '孙思邈', '方书', '竹纸', 1605, '轻微虫蛀'),
+('BK006', 'SHELF-02', 'SLOT-A2', '外台秘要（明崇祯版）', '明', '王焘', '方书', '棉纸', 1640, '良好'),
+('BK007', 'SHELF-02', 'SLOT-B1', '证类本草（明成化刻本）', '明', '唐慎微', '本草', '竹纸', 1485, '严重酸化'),
+('BK008', 'SHELF-02', 'SLOT-B2', '本草经疏（明天启版）', '明', '缪希雍', '本草', '棉纸', 1625, '良好'),
+('BK009', 'SHELF-03', 'SLOT-A1', '脉经（明万历刻本）', '明', '王叔和', '诊断', '竹纸', 1587, '轻微霉变'),
+('BK010', 'SHELF-03', 'SLOT-A2', '针灸甲乙经（清康熙版）', '清', '皇甫谧', '针灸', '棉纸', 1699, '良好'),
+('BK011', 'SHELF-03', 'SLOT-B1', '景岳全书（清乾隆刻本）', '清', '张介宾', '综合', '竹纸', 1750, '良好'),
+('BK012', 'SHELF-03', 'SLOT-B2', '医宗金鉴（清乾隆武英殿版）', '清', '吴谦', '综合', '开化纸', 1742, '良好');

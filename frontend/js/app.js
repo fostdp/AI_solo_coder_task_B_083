@@ -1,434 +1,630 @@
-const API = '/api/v1';
-const SIMULATE = false;
+const API_BASE = 'http://localhost:8000';
 
-class Api {
-  static async get(path, params = {}) {
-    const q = new URLSearchParams(params).toString();
-    const url = q ? `${API}${path}?${q}` : `${API}${path}`;
-    try {
-      const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json();
-    } catch (e) {
-      console.warn(`API fallback ${path}:`, e.message);
-      return null;
-    }
-  }
-  static async post(path, body) {
-    try {
-      const r = await fetch(`${API}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json();
-    } catch (e) {
-      console.warn(`API POST fallback ${path}:`, e.message);
-      return null;
-    }
-  }
+let shelf3d;
+let heatmapManager;
+let currentShelfId = null;
+let currentSlotId = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    init();
+});
+
+function init() {
+    shelf3d = new Shelf3D('shelfCanvas');
+    heatmapManager = new HeatmapManager();
+
+    shelf3d.onSlotClick = (slot) => {
+        loadSlotDetail(slot.shelfId, slot.slotId);
+    };
+
+    bindEvents();
+    loadOverview();
+    loadShelves();
+    loadHeatmapData();
+    loadRecentAlerts();
+    updateTime();
+    setInterval(updateTime, 1000);
+    setInterval(refreshData, 300000);
+
+    setTimeout(() => {
+        shelf3d.render();
+    }, 100);
 }
 
-const AppState = {
-  currentShelfId: null,
-  currentSlot: null,
-  renderer: null,
-  autoRefresh: true,
-  shelves: [],
-};
+function bindEvents() {
+    document.querySelectorAll('.heatmap-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.heatmap-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const type = btn.dataset.type;
+            heatmapManager.setType(type);
+            shelf3d.setHeatmapType(type);
+            loadHeatmapData(type);
+        });
+    });
 
-function showToast(msg, ms = 2000) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.remove('hidden');
-  setTimeout(() => t.classList.add('hidden'), ms);
-}
+    document.querySelectorAll('.view-tab, .tab-btn').forEach(btn => {
+        if (btn.dataset && btn.dataset.view) {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            });
+        }
+    });
 
-async function loadShelves() {
-  const r = await Api.get('/shelves');
-  const list = r?.data;
-  let shelves;
-  if (list && list.length) {
-    shelves = list;
-  } else {
-    shelves = [
-      { shelf_id: 'SH-A-01', location: 'A区一层-01', rows_count: 6, cols_count: 8, book_count: 4320, description: '明版刻本专藏区（本草类）' },
-      { shelf_id: 'SH-A-02', location: 'A区一层-02', rows_count: 6, cols_count: 8, book_count: 4200, description: '明版刻本专藏区（医案类）' },
-      { shelf_id: 'SH-A-03', location: 'A区一层-03', rows_count: 6, cols_count: 8, book_count: 4280, description: '明版手稿与抄本专区' },
-      { shelf_id: 'SH-B-01', location: 'B区二层-01', rows_count: 6, cols_count: 8, book_count: 4250, description: '清版官修医书专藏' },
-      { shelf_id: 'SH-B-02', location: 'B区二层-02', rows_count: 6, cols_count: 8, book_count: 4310, description: '清版家刻本与秘方专藏' },
-      { shelf_id: 'SH-C-01', location: 'C区善本室-01', rows_count: 6, cols_count: 8, book_count: 4400, description: '宋元残卷·善本孤本区' },
-      { shelf_id: 'SH-C-02', location: 'C区善本室-02', rows_count: 6, cols_count: 8, book_count: 4240, description: '宫廷医案·御药房档案专区' },
-    ];
-  }
-  AppState.shelves = shelves;
-  const ul = document.getElementById('shelfList');
-  ul.innerHTML = '';
-  shelves.forEach((s, i) => {
-    const li = document.createElement('li');
-    li.innerHTML = `<div class="sn">${s.shelf_id} <span style="color:var(--sub);font-size:10px;">(${s.rows_count}×${s.cols_count})</span></div>
-                    <div class="sl">${s.location || ''} · ${s.description || ''}</div>`;
-    li.onclick = () => selectShelf(s.shelf_id, i);
-    ul.appendChild(li);
-  });
-  if (shelves.length) selectShelf(shelves[0].shelf_id, 0);
-}
+    document.querySelectorAll('.detail-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabName = tab.dataset.tab;
+            document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+            tab.classList.add('active');
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+        });
+    });
 
-function selectShelf(shelfId, idx) {
-  AppState.currentShelfId = shelfId;
-  document.querySelectorAll('#shelfList li').forEach((li, i) => {
-    li.classList.toggle('active', i === idx);
-  });
-  const s = AppState.shelves[idx];
-  document.getElementById('currentShelfTitle').textContent = `🗄 ${s.shelf_id}`;
-  document.getElementById('currentShelfDesc').textContent = `${s.location || ''} · ${s.description || ''} · 共 ${s.book_count || '?'} 册`;
-  loadHeatmap(shelfId);
-}
-
-async function loadHeatmap(shelfId) {
-  const r = await Api.get('/heatmap', { shelf_id: shelfId });
-  const data = r?.data || [];
-  const rows = r?.rows || 6;
-  const cols = r?.cols || 8;
-  AppState.renderer.setShelf(shelfId, rows, cols, data);
+    document.getElementById('zoomIn').addEventListener('click', () => shelf3d.zoomIn());
+    document.getElementById('zoomOut').addEventListener('click', () => shelf3d.zoomOut());
+    document.getElementById('resetView').addEventListener('click', () => shelf3d.resetView());
+    document.getElementById('rotateLeft').addEventListener('click', () => shelf3d.rotateLeft());
+    document.getElementById('rotateRight').addEventListener('click', () => shelf3d.rotateRight());
 }
 
 async function loadOverview() {
-  const r = await Api.get('/overview/stats');
-  const s = r || {
-    total_books: 30000, total_shelves: 7, total_env_sensors: 50, total_ph_sensors: 20,
-    alerts_24h: { red: 0, orange: 2, yellow: 5, unacknowledged: 3 },
-    realtime_avg: { temperature_c: 21.5, humidity_percent: 48.0, ph: 6.6, mold_spores_cfu: 280 },
-  };
-  const box = document.getElementById('overviewStats');
-  const setStat = (i, v, extra = '') => {
-    box.children[i].querySelector('.v').innerHTML = v + extra;
-  };
-  setStat(0, s.total_books?.toLocaleString() || '—');
-  setStat(1, s.realtime_avg?.temperature_c?.toFixed(1) || '—', '<span class="u" style="font-size:10px;color:var(--sub);">℃</span>');
-  setStat(2, s.realtime_avg?.humidity_percent?.toFixed(1) || '—', '<span class="u" style="font-size:10px;color:var(--sub);">%</span>');
-  setStat(3, s.realtime_avg?.ph?.toFixed(2) || '—');
-  setStat(4, Math.round(s.realtime_avg?.mold_spores_cfu || 0).toLocaleString(), '<span class="u" style="font-size:10px;color:var(--sub);">CFU</span>');
-  const a = s.alerts_24h || {};
-  box.children[5].querySelector('.v').innerHTML =
-    `<em class="r">${a.red || 0}</em><em class="o">${a.orange || 0}</em><em class="y">${a.yellow || 0}</em>`;
+    try {
+        const response = await fetch(`${API_BASE}/api/overview`);
+        const data = await response.json();
+
+        document.getElementById('totalBooks').textContent = data.total_books || '-';
+        document.getElementById('totalShelves').textContent = data.total_shelves || '-';
+        document.getElementById('warningCount').textContent = data.status_summary?.warning || 0;
+        document.getElementById('dangerCount').textContent = data.status_summary?.danger || 0;
+    } catch (e) {
+        console.error('加载概览数据失败:', e);
+        document.getElementById('totalBooks').textContent = '12';
+        document.getElementById('totalShelves').textContent = '3';
+        document.getElementById('warningCount').textContent = '2';
+        document.getElementById('dangerCount').textContent = '1';
+    }
 }
 
-async function loadAlerts() {
-  const r = await Api.get('/alerts', { hours: 24, limit: 8 });
-  const rows = r?.data || [];
-  const box = document.getElementById('alertsList');
-  if (!rows.length) {
-    box.innerHTML = '<div class="empty">暂无告警</div>';
-    return;
-  }
-  box.innerHTML = '';
-  rows.slice(0, 8).forEach(a => {
-    const lv = (a.alert_level || '').toLowerCase();
-    const el = document.createElement('div');
-    el.className = `alert-item ${lv}`;
-    const ts = a.timestamp ? new Date(a.timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
-    el.innerHTML = `
-      <div class="top">
-        <span class="lv">${a.alert_level || ''}</span>
-        <span class="tm">${ts}</span>
-      </div>
-      <div class="msg">${a.message || a.alert_type || ''}</div>
-      ${a.slot_id ? `<div class="slot">📍 ${a.shelf_id || ''} / ${a.slot_id || ''}</div>` : ''}
-    `;
-    el.style.cursor = 'pointer';
-    el.onclick = () => {
-      if (a.shelf_id) {
-        const idx = AppState.shelves.findIndex(s => s.shelf_id === a.shelf_id);
-        if (idx >= 0) selectShelf(a.shelf_id, idx);
-      }
-    };
-    box.appendChild(el);
-  });
+async function loadShelves() {
+    try {
+        const response = await fetch(`${API_BASE}/api/shelves`);
+        const data = await response.json();
+        const shelves = data.shelves;
+
+        const shelfList = Object.keys(shelves).map(shelfId => ({
+            shelf_id: shelfId,
+            slots: shelves[shelfId].length
+        }));
+
+        shelf3d.setShelves(shelfList);
+        shelf3d.render();
+
+        renderShelfNav(shelfList);
+    } catch (e) {
+        console.error('加载书架数据失败:', e);
+        const mockShelves = [
+            { shelf_id: 'SHELF-01', slots: 4 },
+            { shelf_id: 'SHELF-02', slots: 4 },
+            { shelf_id: 'SHELF-03', slots: 4 }
+        ];
+        shelf3d.setShelves(mockShelves);
+        shelf3d.render();
+        renderShelfNav(mockShelves);
+    }
 }
 
-async function onSlotClick(slotBook) {
-  const slot = slotBook.slot || slotBook.data;
-  const b = slotBook;
-  if (!slot || !slot.slot_id) return;
-  AppState.currentSlot = slot;
-  showSlotDetail(slot, b.data);
-  await loadSlotTrends(slot);
-}
+function renderShelfNav(shelves) {
+    const nav = document.getElementById('shelfNav');
+    nav.innerHTML = '';
 
-function showSlotDetail(slot, fullData) {
-  const shelf = AppState.shelves.find(s => s.shelf_id === AppState.currentShelfId) || {};
-  document.getElementById('emptyDetail').classList.add('hidden');
-  document.getElementById('detailContent').classList.remove('hidden');
-
-  const sid = slot.slot_id;
-  const title = slot.book_title || fullData?.book_title || '—';
-  const dyn = slot.book_dynasty || fullData?.book_dynasty || '';
-  const btype = slot.book_type || fullData?.book_type || '';
-  const bcnt = slot.book_count || fullData?.book_count || '?';
-  const senv = slot.sensor_env_id || fullData?.sensor_env_id || '—';
-  const sph = slot.sensor_ph_id || fullData?.sensor_ph_id || '—';
-
-  document.getElementById('slotId').textContent = `📖 ${sid} · ${title}`;
-  document.getElementById('slotMeta').innerHTML =
-    `[${dyn || '?'}代] ${btype || '?'} · 藏 ${bcnt} 册 · 传感器:${senv}/${sph}<br/>位置:${shelf.location || shelf.shelf_id || ''}`;
-
-  const m = fullData?.metrics || slot.metrics || {};
-  const s = fullData?.scores || slot.scores || {};
-  const p = fullData?.prediction || slot.prediction || {};
-
-  document.getElementById('mTemp').innerHTML = `${(m.temperature ?? '—')}<span class="u">℃</span>`;
-  document.getElementById('mHumi').innerHTML = `${(m.humidity ?? '—')}<span class="u">%</span>`;
-  const ph = m.ph ?? p.ph_30d ?? '—';
-  document.getElementById('mPh').innerHTML = `${ph}`;
-  const phTr = document.getElementById('mPhTr');
-  if (p.aging_rate !== undefined) {
-    phTr.innerHTML = `年下降速率: <b style="color:#fdba74;">${p.aging_rate.toFixed?.(3) ?? p.aging_rate} pH/年</b>`;
-  } else phTr.textContent = '';
-  document.getElementById('mMold').innerHTML = `${Math.round(m.mold_spores ?? 0).toLocaleString()}<span class="u">CFU/m³</span>`;
-  document.getElementById('mLight').innerHTML = `${(m.light_lux ?? '—')}<span class="u">lux</span>`;
-  const life = p.life_expectancy;
-  const lifeTxt = (life === undefined || life === null) ? '—' :
-    (life >= 999 ? '>999' : life.toFixed?.(0) ?? life);
-  document.getElementById('mLife').innerHTML = `${lifeTxt}<span class="u">年</span>`;
-
-  const rp = document.getElementById('riskPill');
-  rp.className = 'risk-pill ' + (s.level || 'SAFE');
-  const lvlText = { SAFE: '✅ 安全', LOW: '⚠ 轻微风险', MEDIUM: '⚡ 中等风险', HIGH: '🔥 严重风险', CRITICAL: '💥 危急' };
-  rp.textContent = `${lvlText[s.level] || s.level || '—'}  综合 ${(s.overall ?? 0).toFixed?.(2) ?? s.overall}`;
-
-  renderKpiRow(s, p, m);
-}
-
-function renderKpiRow(scores, pred, metrics) {
-  const container = document.getElementById('kpiRow');
-  const cards = [
-    { k: '酸化风险', v: (scores.acidosis ?? 0).toFixed(2), col: 'var(--acid)', sub: '阈值 ≥0.4需干预' },
-    { k: '霉变风险', v: (scores.mold ?? 0).toFixed(2), col: 'var(--mold)', sub: pred.mold_species?.length ? `易感:${pred.mold_species.join('/')}` : '' },
-    { k: '虫蛀风险', v: (scores.insect ?? 0).toFixed(2), col: 'var(--insect)', sub: '温湿适宜时上升' },
-    { k: '30天pH预测', v: pred.ph_30d?.toFixed?.(2) ?? '—', col: 'var(--ph)', sub: `活化能:${pred.activation_energy_kj ?? '?'} kJ/mol` },
-    { k: '90天pH预测', v: pred.ph_90d?.toFixed?.(2) ?? '—', col: 'var(--ph)', sub: 'Arrhenius动力学估计' },
-    { k: '1年pH预测', v: pred.ph_365d !== undefined ? pred.ph_365d.toFixed(2) : '—', col: 'var(--ph)', sub: `纸型:${pred.paper_type || 'default'}` },
-  ];
-  container.innerHTML = cards.map(c => `
-    <div class="kpi-card" style="border-left:3px solid ${c.col};">
-      <div class="k">${c.k}</div>
-      <div class="v" style="color:${c.col};">${c.v}</div>
-      <div class="sub">${c.sub || ''}</div>
-    </div>
-  `).join('');
-}
-
-async function loadSlotTrends(slot) {
-  const sid = slot.slot_id;
-  const shid = AppState.currentShelfId;
-  const [envTr, phTr] = await Promise.all([
-    Api.get('/env/trend', { shelf_id: shid, slot_id: sid, hours: 24 * 90 }),
-    Api.get('/ph/trend', { shelf_id: shid, slot_id: sid, days: 90 }),
-  ]);
-  const envData = envTr?.data || [];
-  const phData = phTr?.data || [];
-
-  TrendCharts.renderTrend('#chartTemp', envData, 'temp');
-  TrendCharts.renderTrend('#chartHumi', envData, 'humi');
-  TrendCharts.renderTrend('#chartMold', envData, 'mold');
-  TrendCharts.renderTrend('#chartLight', envData, 'light');
-
-  TrendCharts.renderMiniPh('#chartPhHistory', phData);
-
-  const currentSlot = AppState.currentSlot;
-  const m = currentSlot?.metrics || slot.metrics || {};
-  const p = currentSlot?.prediction || slot.prediction || {};
-  const phNow = m.ph ?? p.ph_30d ?? 6.8;
-  const ph30 = p.ph_30d ?? (phNow - 0.08);
-  const ph90 = p.ph_90d ?? (phNow - 0.25);
-  const ph180 = p.ph_180d ?? (phNow - 0.5);
-  const ph365 = p.ph_365d ?? (phNow - 1.0);
-  TrendCharts.renderPhPrediction('#chartPhAge', phNow, ph30, ph90, ph180, ph365, phData);
-
-  await loadHerbs(slot, currentSlot);
-}
-
-async function loadHerbs(slot, fullData) {
-  const s = fullData?.scores || slot.scores || {};
-  const m = fullData?.metrics || slot.metrics || {};
-  const p = fullData?.prediction || slot.prediction || {};
-  const dyn = fullData?.book_dynasty || slot.book_dynasty || '';
-  const diseases = [];
-  if (s.acidosis > 0.2) diseases.push('酸化');
-  if (s.mold > 0.2) diseases.push('霉变');
-  if (s.insect > 0.2) diseases.push('虫蛀');
-
-  const req = {
-    disease_types: diseases,
-    mold_risk: s.mold ?? 0,
-    insect_risk: s.insect ?? 0,
-    ph_value: m.ph ?? p.ph_30d ?? null,
-    top_k: 4,
-    book_dynasty: dyn,
-  };
-  const r = await Api.post('/herbs/recommend', req);
-  const data = r || buildMockHerbs(diseases, req);
-  renderPrescription(data);
-  renderHerbList(data);
-}
-
-function buildMockHerbs(diseases, req) {
-  const all = [
-    { id: 'herb_yuncao', name: '芸香草', latin: 'Cymbopogon distans', bencao_ref: '《本草纲目·草部》', dynasty: '明',
-      efficacy: ['驱虫', '防霉', '抑菌'], target_diseases: ['虫蛀', '霉变'],
-      usage: '阴干研末，撒于书叶之间；或缝制香囊置于书架四角。每册3-5g，每季度更换一次。',
-      contraindications: '气虚血燥者慎用；远离火源，挥发油易燃。',
-      source_books: ['本草纲目', '遵生八笺'], efficacy_score: 0.88, safety_score: 0.92 },
-    { id: 'herb_huangbai', name: '黄柏', latin: 'Phellodendron chinense', bencao_ref: '《本草纲目·木部·黄柏》', dynasty: '明',
-      efficacy: ['防虫', '抑菌', '脱酸辅助'], target_diseases: ['酸化', '虫蛀', '霉变'],
-      usage: '黄柏煎汁（1:10）涂布纸张或书匣内壁；亦可浸制防蠹纸夹入书中。',
-      contraindications: '直接接触明黄绫封面可能导致轻微褪色。',
-      source_books: ['本草纲目', '齐民要术'], efficacy_score: 0.91, safety_score: 0.80 },
-  ];
-  return {
-    detected_diseases: diseases,
-    risk_profile: { ph_value: req.ph_value, mold_risk: req.mold_risk, insect_risk: req.insect_risk, acidification_level: '正常' },
-    recommendations: all.map(h => ({ herb: h, match_score: 1.5, confidence: 0.75, match_reasons: diseases, historical_cases: [] })),
-    treatment_protocol: {
-      urgency: 'ROUTINE', steps: [
-        { step: 1, action: '长期藏护', description: '每格放置芸草香囊，书架四角置苍术块。严格控制库温18-22℃、湿度45%-55%、光照<50lux。', herbs_used: ['芸香草', '苍术'], priority: 'MEDIUM' },
-      ],
-      expected_outcome: '可降低霉菌萌发率约85%、抑制虫害约90%、延缓pH下降约60%。',
-      follow_up: '每季度一次微环境评估，每年一次深度检视。',
-    },
-  };
-}
-
-function renderPrescription(data) {
-  const p = data.treatment_protocol || {};
-  const urg = p.urgency || 'ROUTINE';
-  const urgText = { CRITICAL: '🚨 危急处置', HIGH: '🟠 紧急处理', MEDIUM: '🟡 标准干预', ROUTINE: '🟢 常规养护' };
-  const steps = (p.steps || []).map(s => `
-    <div class="step ${s.priority}">
-      <div class="sh">Step ${s.step} · ${s.action}<span class="prio">${s.priority === 'HIGH' ? '高优' : s.priority === 'MEDIUM' ? '中优' : '常规'}</span></div>
-      <div class="sd">${s.description}</div>
-      ${s.herbs_used?.length ? `<div class="hu">🌿 用药：${s.herbs_used.join(' · ')}</div>` : ''}
-    </div>
-  `).join('');
-  document.getElementById('prescriptionCard').innerHTML = `
-    <span class="urg ${urg}">${urgText[urg] || urg}</span>
-    <div style="font-size:11px;color:var(--sub);margin-top:8px;">
-      <b style="color:var(--text);">检测病害：</b>${(data.detected_diseases?.length ? data.detected_diseases.join('、') : '无明显病害') || '无明显病害'}
-    </div>
-    <h4>📋 防治方案（基于古籍记载 + 现代文物保护研究）</h4>
-    ${steps}
-    ${p.expected_outcome ? `<div class="outcome">🎯 预期效果：${p.expected_outcome}</div>` : ''}
-    ${p.follow_up ? `<div class="follow">📝 随访计划：${p.follow_up}</div>` : ''}
-  `;
-}
-
-function renderHerbList(data) {
-  const list = document.getElementById('herbList');
-  const recs = data.recommendations || [];
-  if (!recs.length) { list.innerHTML = '<div class="empty" style="color:var(--sub);padding:30px;text-align:center;">暂无匹配药方</div>'; return; }
-  list.innerHTML = recs.map(r => {
-    const h = r.herb || {};
-    const eff = (h.efficacy || []).map(e => `<span>${e}</span>`).join('');
-    const conf = Math.round((r.confidence || 0) * 100);
-    const reasons = (r.match_reasons || []).map(x => `#${x}`).join(' ');
-    const hist = (r.historical_cases || []).map(c => `<div>📜 ${c}</div>`).join('');
-    return `
-      <div class="herb-card">
-        <div class="herb-head">
-          <div>
-            <div class="herb-name">🌿 ${h.name || ''}</div>
-            <div class="herb-latin">${h.latin || ''}</div>
-            <div class="herb-ref">${h.bencao_ref || ''} · ${h.dynasty || ''}代</div>
-          </div>
-          <div class="herb-score">
-            <div class="conf">匹配度 ${conf}%</div>
-            <div style="font-size:9px;color:var(--sub);margin-top:3px;">
-              效${Math.round((h.efficacy_score || 0) * 100)} · 安${Math.round((h.safety_score || 0) * 100)}
-            </div>
-          </div>
-        </div>
-        <div class="herb-efficacy">${eff}</div>
-        <div class="herb-meta">
-          <div class="blk"><div class="bk">来源医籍</div><div class="bv">${(h.source_books || []).join('、') || '—'}</div></div>
-          <div class="blk"><div class="bk">主治病害</div><div class="bv">${(h.target_diseases || []).join('、') || '—'}</div></div>
-        </div>
-        <div class="herb-usage">💡 <b>古法使用</b>：${h.usage || ''}</div>
-        ${h.contraindications ? `<div class="herb-contra">⚠ 注意：${h.contraindications}</div>` : ''}
-        ${reasons ? `<div class="herb-match">🔗 匹配依据：${reasons}</div>` : ''}
-        ${hist ? `<div class="herb-historical">${hist}</div>` : ''}
-      </div>
-    `;
-  }).join('');
-}
-
-function initRenderer() {
-  const canvas = document.getElementById('shelfCanvas');
-  const r = new Shelf3DRenderer(canvas);
-  AppState.renderer = r;
-  r.on('slotClick', onSlotClick);
-  r.on('zoom', z => { /* showToast(`缩放 ${(z * 100).toFixed(0)}%`, 1200); */ });
-  document.getElementById('resetViewBtn').onclick = () => r.resetView();
-  document.getElementById('zoomInBtn').onclick = () => r.zoomBy(1.15);
-  document.getElementById('zoomOutBtn').onclick = () => r.zoomBy(1 / 1.15);
-  document.querySelectorAll('.layer-toggles input').forEach(inp => {
-    inp.onchange = () => {
-      const layers = {};
-      document.querySelectorAll('.layer-toggles input').forEach(i => layers[i.dataset.layer] = i.checked);
-      r.setLayers(layers);
-    };
-  });
-  window.addEventListener('resize', () => { r.resize(); r.requestRender(); });
-}
-
-function initTabs() {
-  const tabs = document.querySelectorAll('#tabBar .tab');
-  tabs.forEach(t => {
-    t.onclick = () => {
-      tabs.forEach(x => x.classList.remove('active'));
-      t.classList.add('active');
-      const key = t.dataset.tab;
-      ['env', 'age', 'herb'].forEach(k => {
-        document.getElementById(`tab-${k}`).classList.toggle('hidden', k !== key);
-      });
-      if (key === 'env' && AppState.currentSlot) {
-        setTimeout(() => {
-          const slot = AppState.currentSlot;
-          loadSlotTrends(slot);
-        }, 30);
-      }
-    };
-  });
-}
-
-function initTopbar() {
-  document.getElementById('refreshBtn').onclick = async () => {
-    showToast('🔄 刷新中...', 900);
-    await Promise.all([loadOverview(), loadAlerts()]);
-    if (AppState.currentShelfId) await loadHeatmap(AppState.currentShelfId);
-  };
-  const autoBtn = document.getElementById('autoRefreshBtn');
-  autoBtn.onclick = () => {
-    AppState.autoRefresh = !AppState.autoRefresh;
-    autoBtn.classList.toggle('active', AppState.autoRefresh);
-    autoBtn.textContent = AppState.autoRefresh ? '⏱ 自动刷新' : '⏸ 已暂停';
-  };
-  setInterval(() => {
-    if (!AppState.autoRefresh) return;
-    Promise.all([loadOverview(), loadAlerts()]).then(() => {
-      if (AppState.currentShelfId && Math.random() < 0.5) loadHeatmap(AppState.currentShelfId);
+    shelves.forEach(shelf => {
+        const btn = document.createElement('button');
+        btn.className = 'shelf-nav-btn';
+        btn.textContent = shelf.shelf_id;
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.shelf-nav-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            shelf3d.focusShelf(shelf.shelf_id);
+        });
+        nav.appendChild(btn);
     });
-  }, 30000);
 }
 
-async function boot() {
-  initRenderer();
-  initTabs();
-  initTopbar();
-  await loadShelves();
-  await Promise.all([loadOverview(), loadAlerts()]);
-  showToast('✅ 系统初始化完成，选择书架开始监测', 2200);
+async function loadHeatmapData(type = 'ph') {
+    try {
+        const response = await fetch(`${API_BASE}/api/analysis/heatmap?type=${type}`);
+        const data = await response.json();
+
+        heatmapManager.setData(data.data);
+        shelf3d.setHeatmapData(data.data);
+        shelf3d.render();
+
+        const stats = heatmapManager.calculateRiskStats();
+        document.getElementById('warningCount').textContent = stats.warning;
+        document.getElementById('dangerCount').textContent = stats.danger;
+    } catch (e) {
+        console.error('加载热力图数据失败:', e);
+        const mockData = generateMockHeatmapData();
+        heatmapManager.setData(mockData);
+        shelf3d.setHeatmapData(mockData);
+        shelf3d.render();
+    }
 }
 
-document.addEventListener('DOMContentLoaded', boot);
+function generateMockHeatmapData() {
+    const shelves = ['SHELF-01', 'SHELF-02', 'SHELF-03'];
+    const slots = ['SLOT-A1', 'SLOT-A2', 'SLOT-B1', 'SLOT-B2'];
+    const data = [];
+
+    shelves.forEach(shelfId => {
+        slots.forEach(slotId => {
+            const ph = 5.8 + Math.random() * 1.5;
+            let level = 'normal';
+            if (ph < 5.5) level = 'danger';
+            else if (ph < 6.5) level = 'warning';
+
+            data.push({
+                shelf_id: shelfId,
+                slot_id: slotId,
+                value: ph,
+                level: level,
+                book_title: getMockBookTitle(shelfId, slotId)
+            });
+        });
+    });
+
+    return data;
+}
+
+function getMockBookTitle(shelfId, slotId) {
+    const books = {
+        'SHELF-01': {
+            'SLOT-A1': '本草纲目（明万历刻本）',
+            'SLOT-A2': '黄帝内经素问（明嘉靖版）',
+            'SLOT-B1': '伤寒论（清康熙刻本）',
+            'SLOT-B2': '金匮要略（清乾隆版）'
+        },
+        'SHELF-02': {
+            'SLOT-A1': '千金要方（明万历刻本）',
+            'SLOT-A2': '外台秘要（明崇祯版）',
+            'SLOT-B1': '证类本草（明成化刻本）',
+            'SLOT-B2': '本草经疏（明天启版）'
+        },
+        'SHELF-03': {
+            'SLOT-A1': '脉经（明万历刻本）',
+            'SLOT-A2': '针灸甲乙经（清康熙版）',
+            'SLOT-B1': '景岳全书（清乾隆刻本）',
+            'SLOT-B2': '医宗金鉴（清乾隆武英殿版）'
+        }
+    };
+    return books[shelfId]?.[slotId] || '古籍';
+}
+
+async function loadSlotDetail(shelfId, slotId) {
+    currentShelfId = shelfId;
+    currentSlotId = slotId;
+
+    const panel = document.getElementById('detailPanel');
+    panel.style.display = 'flex';
+
+    document.getElementById('detailTitle').textContent = `${shelfId} / ${slotId}`;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/slot/${shelfId}/${slotId}?days=90`);
+        const data = await response.json();
+
+        renderCurrentData(data.current);
+        renderEnvChart(data.env_trend);
+        renderPhChart(data.ph_trend);
+        renderPrediction(data.prediction);
+        renderRiskAssessment(data.risk_assessment);
+        renderKnowledge(data.knowledge_recommendation);
+        renderBooks(data.books);
+    } catch (e) {
+        console.error('加载格口详情失败:', e);
+        renderMockDetail(shelfId, slotId);
+    }
+}
+
+function renderCurrentData(current) {
+    document.getElementById('currentTemp').textContent = current.temperature?.toFixed(1) + '°C' || '-';
+    document.getElementById('currentHumid').textContent = current.humidity?.toFixed(1) + '%' || '-';
+    document.getElementById('currentMold').textContent = current.mold_spore?.toFixed(0) + ' CFU/m³' || '-';
+    document.getElementById('currentVoc').textContent = current.voc?.toFixed(1) + ' ppb' || '-';
+    document.getElementById('currentPh').textContent = current.ph?.toFixed(2) || '-';
+}
+
+function renderEnvChart(envTrend) {
+    const chart = new TrendChart('envChart');
+    chart.drawEnvChart(envTrend);
+}
+
+function renderPhChart(phTrend) {
+    const chart = new TrendChart('phChart');
+    chart.drawPhChart(phTrend);
+}
+
+function renderPrediction(prediction) {
+    if (prediction.ph) {
+        document.getElementById('pred30').textContent = prediction.ph['30d']?.toFixed(2) || '-';
+        document.getElementById('pred90').textContent = prediction.ph['90d']?.toFixed(2) || '-';
+        document.getElementById('pred180').textContent = prediction.ph['180d']?.toFixed(2) || '-';
+    }
+
+    if (prediction.aging_info) {
+        const info = prediction.aging_info;
+        document.getElementById('agingRate').textContent = info.ph_decay_rate_per_year + ' /年';
+        document.getElementById('predictedLifetime').textContent = info.predicted_lifetime_years + ' 年';
+        document.getElementById('agingSeverity').textContent = getSeverityText(info.aging_severity);
+    }
+
+    const predChart = new TrendChart('predictionChart');
+    const currentPh = prediction.current_ph || 6.8;
+    const predictions = prediction.ph || { '30d': 6.7, '90d': 6.6, '180d': 6.4 };
+    predChart.drawPredictionChart(currentPh, {
+        30: predictions['30d'],
+        90: predictions['90d'],
+        180: predictions['180d']
+    }, null);
+
+    const moldChart = new TrendChart('moldRiskChart');
+    const moldData = [];
+    for (let i = 0; i <= 30; i += 5) {
+        moldData.push({
+            day: i,
+            spore_concentration: (prediction.mold_risk?.predicted_spores_7d || 100) * (1 + i * 0.1)
+        });
+    }
+    moldChart.drawMoldRiskChart(moldData);
+}
+
+function getSeverityText(severity) {
+    const texts = {
+        'normal': '正常',
+        'caution': '轻微',
+        'warning': '警告',
+        'critical': '严重'
+    };
+    return texts[severity] || severity;
+}
+
+function renderRiskAssessment(risk) {
+    document.getElementById('riskScore').textContent = risk.overall_risk_score?.toFixed(1) || '-';
+    document.getElementById('riskLevel').textContent = getRiskLevelText(risk.overall_risk_level);
+
+    const typesContainer = document.getElementById('riskTypes');
+    typesContainer.innerHTML = '';
+
+    const riskTypeNames = {
+        'acidification': '酸化',
+        'mold': '霉变',
+        'insect': '虫蛀',
+        'light_damage': '光老化',
+        'humidity_damage': '潮湿'
+    };
+
+    (risk.primary_risks || []).forEach(type => {
+        const tag = document.createElement('span');
+        tag.className = 'risk-type-tag';
+        tag.textContent = riskTypeNames[type] || type;
+        typesContainer.appendChild(tag);
+    });
+}
+
+function getRiskLevelText(level) {
+    const texts = {
+        'normal': '正常',
+        'caution': '低风险',
+        'warning': '中风险',
+        'critical': '高风险'
+    };
+    return texts[level] || level;
+}
+
+function renderKnowledge(knowledge) {
+    const herbsContainer = document.getElementById('herbRecommendations');
+    herbsContainer.innerHTML = '';
+
+    (knowledge.recommended_herbs || []).forEach(herb => {
+        const item = document.createElement('div');
+        item.className = 'herb-item';
+        item.innerHTML = `
+            <div class="herb-name">${herb.name} <span style="font-size:11px;color:#999;">${herb.pinyin || ''}</span></div>
+            <div class="herb-props">${herb.properties || ''}</div>
+            <div class="herb-usage">用法：${herb.usage || ''}</div>
+            <div class="herb-usage" style="margin-top:4px;">
+                参考：${(herb.references || []).join('、')}
+            </div>
+        `;
+        herbsContainer.appendChild(item);
+    });
+
+    const prescriptionsContainer = document.getElementById('prescriptions');
+    prescriptionsContainer.innerHTML = '';
+
+    (knowledge.recommended_prescriptions || []).forEach(prescription => {
+        const item = document.createElement('div');
+        item.className = 'prescription-item';
+        item.innerHTML = `
+            <div class="prescription-name">${prescription.name}</div>
+            <div class="prescription-method">${prescription.method || ''}</div>
+            <div class="prescription-source">出处：${prescription.source || ''}</div>
+        `;
+        prescriptionsContainer.appendChild(item);
+    });
+
+    const tipsContainer = document.getElementById('preventionTips');
+    tipsContainer.innerHTML = '';
+
+    (knowledge.prevention_tips || []).forEach(tip => {
+        const li = document.createElement('li');
+        li.textContent = tip;
+        tipsContainer.appendChild(li);
+    });
+
+    const refsContainer = document.getElementById('references');
+    refsContainer.innerHTML = '';
+}
+
+function renderBooks(books) {
+    const container = document.getElementById('bookList');
+    container.innerHTML = '';
+
+    (books || []).forEach(book => {
+        const item = document.createElement('div');
+        item.className = 'book-item';
+
+        const conditionClass = book.condition?.includes('良好') ? 'condition-good' :
+                              book.condition?.includes('轻微') ? 'condition-warn' : 'condition-bad';
+
+        item.innerHTML = `
+            <div class="book-title">
+                ${book.title || '古籍'}
+                <span class="book-condition ${conditionClass}">${book.condition || '未知'}</span>
+            </div>
+            <div class="book-meta">
+                ${book.dynasty || ''}·${book.author || ''}
+                ${book.category ? ` | ${book.category}` : ''}
+                ${book.material ? ` | ${book.material}` : ''}
+            </div>
+        `;
+        container.appendChild(item);
+    });
+}
+
+async function loadRecentAlerts() {
+    try {
+        const response = await fetch(`${API_BASE}/api/alerts?limit=10`);
+        const data = await response.json();
+        renderAlerts(data.alerts || []);
+    } catch (e) {
+        console.error('加载告警失败:', e);
+        renderMockAlerts();
+    }
+}
+
+function renderAlerts(alerts) {
+    const container = document.getElementById('alertList');
+
+    if (!alerts || alerts.length === 0) {
+        container.innerHTML = '<div class="empty-tip">暂无告警</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+
+    alerts.slice(0, 8).forEach(alert => {
+        const item = document.createElement('div');
+        item.className = `alert-item alert-${alert.alert_level || 'yellow'}`;
+        item.innerHTML = `
+            <div class="alert-title">${getAlertTypeText(alert.alert_type)}</div>
+            <div>${alert.shelf_id} / ${alert.slot_id}</div>
+            <div class="alert-time">${formatTime(alert.timestamp)}</div>
+        `;
+        container.appendChild(item);
+    });
+}
+
+function renderMockAlerts() {
+    const mockAlerts = [
+        { alert_level: 'orange', alert_type: 'ph_low', shelf_id: 'SHELF-02', slot_id: 'SLOT-B1', timestamp: new Date().toISOString() },
+        { alert_level: 'yellow', alert_type: 'mold_spore_high', shelf_id: 'SHELF-03', slot_id: 'SLOT-A1', timestamp: new Date(Date.now() - 3600000).toISOString() },
+        { alert_level: 'yellow', alert_type: 'ph_low', shelf_id: 'SHELF-01', slot_id: 'SLOT-A2', timestamp: new Date(Date.now() - 7200000).toISOString() }
+    ];
+    renderAlerts(mockAlerts);
+}
+
+function getAlertTypeText(type) {
+    const types = {
+        'ph_low': 'pH值偏低',
+        'mold_spore_high': '霉菌孢子超标',
+        'light_high': '光照超标',
+        'active_mold': '活性霉菌'
+    };
+    return types[type] || type;
+}
+
+function formatTime(timestamp) {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    return `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function closeDetail() {
+    document.getElementById('detailPanel').style.display = 'none';
+    currentShelfId = null;
+    currentSlotId = null;
+}
+
+function updateTime() {
+    const now = new Date();
+    const timeStr = now.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+    document.getElementById('currentTime').textContent = timeStr;
+}
+
+function refreshData() {
+    loadOverview();
+    loadHeatmapData(heatmapManager.currentType);
+    loadRecentAlerts();
+}
+
+function renderMockDetail(shelfId, slotId) {
+    const current = {
+        temperature: 21.5 + Math.random() * 2,
+        humidity: 50 + Math.random() * 10,
+        mold_spore: 100 + Math.random() * 400,
+        voc: 150 + Math.random() * 100,
+        ph: 6.0 + Math.random() * 1.0,
+        light: 25 + Math.random() * 20
+    };
+
+    const envTrend = [];
+    for (let i = 0; i < 30; i++) {
+        envTrend.push({
+            timestamp: new Date(Date.now() - (30 - i) * 24 * 3600000).toISOString(),
+            avg_temperature: 20 + Math.sin(i / 3) * 2 + Math.random(),
+            avg_humidity: 50 + Math.cos(i / 4) * 10 + Math.random() * 2,
+            avg_mold_spore: 200 + Math.sin(i / 5) * 100 + Math.random() * 50,
+            avg_voc: 150 + Math.random() * 50,
+            avg_light: 30 + Math.sin(i / 7) * 15
+        });
+    }
+
+    const phTrend = [];
+    let ph = 6.8;
+    for (let i = 0; i < 30; i++) {
+        ph -= 0.005 + Math.random() * 0.01;
+        phTrend.push({
+            date: new Date(Date.now() - (30 - i) * 24 * 3600000).toISOString().split('T')[0],
+            avg_ph: ph,
+            max_ph: ph + 0.1,
+            min_ph: ph - 0.1
+        });
+    }
+
+    renderCurrentData(current);
+    renderEnvChart(envTrend);
+    renderPhChart(phTrend);
+
+    document.getElementById('pred30').textContent = (current.ph - 0.05).toFixed(2);
+    document.getElementById('pred90').textContent = (current.ph - 0.15).toFixed(2);
+    document.getElementById('pred180').textContent = (current.ph - 0.3).toFixed(2);
+    document.getElementById('agingRate').textContent = '0.06 /年';
+    document.getElementById('predictedLifetime').textContent = '约 25 年';
+    document.getElementById('agingSeverity').textContent = '轻微';
+
+    const predChart = new TrendChart('predictionChart');
+    predChart.drawPredictionChart(current.ph, {
+        30: current.ph - 0.05,
+        90: current.ph - 0.15,
+        180: current.ph - 0.3
+    }, phTrend);
+
+    const moldChart = new TrendChart('moldRiskChart');
+    const moldData = [];
+    for (let i = 0; i <= 30; i += 5) {
+        moldData.push({
+            day: i,
+            spore_concentration: current.mold_spore * (1 + i * 0.08)
+        });
+    }
+    moldChart.drawMoldRiskChart(moldData);
+
+    const riskLevel = current.ph < 5.5 ? 'critical' : current.ph < 6.5 ? 'warning' : 'normal';
+    const riskScore = Math.max(0, (6.5 - current.ph) / 2 * 100);
+
+    document.getElementById('riskScore').textContent = riskScore.toFixed(1);
+    document.getElementById('riskLevel').textContent = getRiskLevelText(riskLevel);
+
+    const typesContainer = document.getElementById('riskTypes');
+    typesContainer.innerHTML = '';
+    if (current.ph < 6.5) {
+        const tag = document.createElement('span');
+        tag.className = 'risk-type-tag';
+        tag.textContent = '酸化';
+        typesContainer.appendChild(tag);
+    }
+    if (current.mold_spore > 300) {
+        const tag = document.createElement('span');
+        tag.className = 'risk-type-tag';
+        tag.textContent = '霉变';
+        typesContainer.appendChild(tag);
+    }
+
+    renderMockKnowledge();
+
+    const mockBooks = [
+        {
+            title: getMockBookTitle(shelfId, slotId),
+            dynasty: shelfId === 'SHELF-01' ? '明' : '清',
+            author: ['李时珍', '张仲景', '孙思邈', '吴谦'][Math.floor(Math.random() * 4)],
+            category: ['本草', '伤寒', '方书', '综合'][Math.floor(Math.random() * 4)],
+            material: ['竹纸', '棉纸', '开化纸'][Math.floor(Math.random() * 3)],
+            condition: ['良好', '轻微酸化', '轻微虫蛀'][Math.floor(Math.random() * 3)]
+        }
+    ];
+    renderBooks(mockBooks);
+}
+
+function renderMockKnowledge() {
+    const mockHerbs = [
+        { name: '黄柏', pinyin: 'huáng bǎi', properties: '味苦，性寒。清热燥湿，泻火解毒。', usage: '黄柏煎汁染纸，可使纸呈黄色，经久不褪，兼有防蛀、耐水之效', references: ['《天工开物》', '《纸墨笺》'] },
+        { name: '芸草', pinyin: 'yún cǎo', properties: '味辛、苦，性寒。清热解毒，散瘀止血。', usage: '晒干置于书间，其香气可驱虫防霉，古称"书香"即源于此', references: ['《梦溪笔谈》', '《本草纲目》'] }
+    ];
+
+    const herbsContainer = document.getElementById('herbRecommendations');
+    herbsContainer.innerHTML = '';
+    mockHerbs.forEach(herb => {
+        const item = document.createElement('div');
+        item.className = 'herb-item';
+        item.innerHTML = `
+            <div class="herb-name">${herb.name} <span style="font-size:11px;color:#999;">${herb.pinyin}</span></div>
+            <div class="herb-props">${herb.properties}</div>
+            <div class="herb-usage">用法：${herb.usage}</div>
+            <div class="herb-usage" style="margin-top:4px;">参考：${herb.references.join('、')}</div>
+        `;
+        herbsContainer.appendChild(item);
+    });
+
+    const mockPrescriptions = [
+        { name: '黄柏染纸法', method: '取黄柏一斤，锉碎，以水五升煮取二升，去滓。浸纸令透，取出阴干。', source: '《齐民要术·杂说》' },
+        { name: '芸香避蠹法', method: '采芸草，阴干，每册置两三本于书根处。其香清远，可辟蠹鱼。', source: '《梦溪笔谈·辩证一》' }
+    ];
+
+    const prescriptionsContainer = document.getElementById('prescriptions');
+    prescriptionsContainer.innerHTML = '';
+    mockPrescriptions.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'prescription-item';
+        item.innerHTML = `
+            <div class="prescription-name">${p.name}</div>
+            <div class="prescription-method">${p.method}</div>
+            <div class="prescription-source">出处：${p.source}</div>
+        `;
+        prescriptionsContainer.appendChild(item);
+    });
+
+    const tips = [
+        '控制库房温度在18-22℃',
+        '相对湿度保持在45-55%',
+        '使用芸草、樟脑等天然防霉剂',
+        '定期检测纸张pH值'
+    ];
+
+    const tipsContainer = document.getElementById('preventionTips');
+    tipsContainer.innerHTML = '';
+    tips.forEach(tip => {
+        const li = document.createElement('li');
+        li.textContent = tip;
+        tipsContainer.appendChild(li);
+    });
+}

@@ -1,659 +1,620 @@
-/**
- * Canvas 三维书架模型 + 病害热力图渲染器
- * 支持：伪3D透视、拖拽旋转、滚轮缩放、热力图叠加、格口点击
- */
-class Shelf3DRenderer {
-  constructor(canvasEl) {
-    this.canvas = canvasEl;
-    this.ctx = canvasEl.getContext('2d');
-    this.dpr = window.devicePixelRatio || 1;
-    this.resize();
+class Shelf3D {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
 
-    this.view = {
-      rotY: 0.35,
-      rotX: 0.12,
-      zoom: 1.0,
-      panX: 0,
-      panY: 0,
-    };
+        this.shelves = [];
+        this.heatmapData = [];
+        this.heatmapType = 'ph';
 
-    this.shelf = null;
-    this.slots = [];
-    this.hitMap = [];
-    this.hoverSlot = null;
-    this._cachedImageData = null;
-    this._cachedImageDataW = 0;
-    this._cachedImageDataH = 0;
-    this._cachedViewKey = null;
-    this._cachedHeatKey = null;
-    this._prevHeatKey = null;
-    this._offscreenCanvas = null;
-    this._offCtx = null;
-    this._bgCacheDirty = true;
+        this.viewAngleX = 0.6;
+        this.viewAngleY = 0.3;
+        this.zoom = 1;
+        this.offsetX = 0;
+        this.offsetY = 0;
 
-    this.layers = { acidosis: true, mold: true, insect: true };
-    this._isDragging = false;
-    this._dragStart = null;
-    this._didDrag = false;
-    this._bindEvents();
+        this.isDragging = false;
+        this.lastMouseX = 0;
+        this.lastMouseY = 0;
 
-    this._animId = null;
-    this._lastRender = 0;
-  }
+        this.hoveredSlot = null;
+        this.selectedSlot = null;
+        this.onSlotClick = null;
 
-  resize() {
-    const rect = this.canvas.getBoundingClientRect();
-    this.w = Math.floor(rect.width || this.canvas.width);
-    this.h = Math.floor(rect.height || this.canvas.height);
-    this.canvas.width = this.w * this.dpr;
-    this.canvas.height = this.h * this.dpr;
-    this.canvas.style.width = this.w + 'px';
-    this.canvas.style.height = this.h + 'px';
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.cx = this.w / 2;
-    this.cy = this.h / 2 + 30;
-    this._bgCacheDirty = true;
-    this._cachedImageData = null;
-    this._cachedImageDataW = 0;
-    this._cachedImageDataH = 0;
-  }
+        this._init();
+    }
 
-  setShelf(shelfId, rows, cols, slots) {
-    this.shelf = { id: shelfId, rows, cols };
-    this.slots = slots || [];
-    this._cachedImageData = null;
-    this._prevHeatKey = null;
-    this._bgCacheDirty = true;
-    this.requestRender();
-  }
+    _init() {
+        this._resize();
+        window.addEventListener('resize', () => this._resize());
+        this._bindEvents();
+    }
 
-  setLayers(layers) {
-    this.layers = { ...this.layers, ...layers };
-    this._bgCacheDirty = true;
-    this._cachedImageData = null;
-    this.requestRender();
-  }
+    _resize() {
+        const rect = this.canvas.parentElement.getBoundingClientRect();
+        this.canvas.width = rect.width;
+        this.canvas.height = rect.height;
+        this.width = this.canvas.width;
+        this.height = this.canvas.height;
+    }
 
-  setView(v) {
-    Object.assign(this.view, v);
-    this.requestRender();
-  }
+    _bindEvents() {
+        this.canvas.addEventListener('mousedown', (e) => this._onMouseDown(e));
+        this.canvas.addEventListener('mousemove', (e) => this._onMouseMove(e));
+        this.canvas.addEventListener('mouseup', () => this._onMouseUp());
+        this.canvas.addEventListener('mouseleave', () => this._onMouseUp());
+        this.canvas.addEventListener('click', (e) => this._onClick(e));
+        this.canvas.addEventListener('wheel', (e) => this._onWheel(e));
+    }
 
-  resetView() {
-    this.view = { rotY: 0.35, rotX: 0.12, zoom: 1.0, panX: 0, panY: 0 };
-    this.requestRender();
-  }
+    _onMouseDown(e) {
+        this.isDragging = true;
+        this.lastMouseX = e.clientX;
+        this.lastMouseY = e.clientY;
+    }
 
-  rotate(dY, dX) {
-    this.view.rotY += dY;
-    this.view.rotX += dX;
-    this.view.rotX = Math.max(-0.5, Math.min(0.6, this.view.rotX));
-    this.requestRender();
-  }
-
-  zoomBy(factor) {
-    this.view.zoom = Math.max(0.5, Math.min(2.5, this.view.zoom * factor));
-    this.requestRender();
-    return this.view.zoom;
-  }
-
-  _bindEvents() {
-    const cv = this.canvas;
-
-    cv.addEventListener('mousedown', (e) => {
-      this._isDragging = true;
-      this._didDrag = false;
-      const p = this._getMouse(e);
-      this._dragStart = { x: p.x, y: p.y, ry: this.view.rotY, rx: this.view.rotX, t: Date.now() };
-    });
-
-    window.addEventListener('mousemove', (e) => {
-      const p = this._getMouse(e);
-      if (this._isDragging && this._dragStart) {
-        const dx = p.x - this._dragStart.x;
-        const dy = p.y - this._dragStart.y;
-        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) this._didDrag = true;
-        this.view.rotY = this._dragStart.ry + dx * 0.008;
-        this.view.rotX = Math.max(-0.5, Math.min(0.6, this._dragStart.rx - dy * 0.006));
-        this.requestRender();
-      } else {
-        this._updateHover(p);
-      }
-    });
-
-    window.addEventListener('mouseup', (e) => {
-      if (this._isDragging && !this._didDrag && Date.now() - (this._dragStart?.t || 0) < 300) {
-        const p = this._getMouse(e);
-        const slot = this._hitTest(p.x, p.y);
-        if (slot) this._emit('slotClick', slot);
-      }
-      this._isDragging = false;
-      this._dragStart = null;
-    });
-
-    cv.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      const z = this.zoomBy(f);
-      this._emit('zoom', z);
-    }, { passive: false });
-
-    cv.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 1) {
-        const t = e.touches[0];
-        this._isDragging = true;
-        this._didDrag = false;
-        this._dragStart = { x: t.clientX, y: t.clientY, ry: this.view.rotY, rx: this.view.rotX, t: Date.now() };
-      }
-    });
-    cv.addEventListener('touchmove', (e) => {
-      if (this._isDragging && e.touches.length === 1) {
-        const t = e.touches[0];
-        const dx = t.clientX - this._dragStart.x;
-        const dy = t.clientY - this._dragStart.y;
-        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) this._didDrag = true;
-        this.view.rotY = this._dragStart.ry + dx * 0.008;
-        this.view.rotX = Math.max(-0.5, Math.min(0.6, this._dragStart.rx - dy * 0.006));
-        this.requestRender();
-        e.preventDefault();
-      }
-    });
-    cv.addEventListener('touchend', (e) => {
-      if (this._isDragging && !this._didDrag) {
-        const p = this._dragStart;
+    _onMouseMove(e) {
         const rect = this.canvas.getBoundingClientRect();
-        const slot = this._hitTest(p.x - rect.left, p.y - rect.top);
-        if (slot) this._emit('slotClick', slot);
-      }
-      this._isDragging = false;
-      this._dragStart = null;
-    });
-  }
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
 
-  _getMouse(e) {
-    const rect = this.canvas.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  }
-
-  _listeners = {};
-  on(evt, cb) { this._listeners[evt] = cb; }
-  _emit(evt, data) { if (this._listeners[evt]) this._listeners[evt](data); }
-
-  _updateHover(p) {
-    const slot = this._hitTest(p.x, p.y);
-    if (slot !== this.hoverSlot) {
-      this.hoverSlot = slot;
-      this.canvas.style.cursor = slot ? 'pointer' : (this._isDragging ? 'grabbing' : 'grab');
-      this.requestRender();
-    }
-  }
-
-  _hitTest(x, y) {
-    const cx = this.ctx;
-    for (let i = this.hitMap.length - 1; i >= 0; i--) {
-      const h = this.hitMap[i];
-      if (cx.isPointInPath(h.path, x * this.dpr, y * this.dpr)) {
-        return h.slot;
-      }
-    }
-    return null;
-  }
-
-  requestRender() {
-    if (this._animId) return;
-    this._animId = requestAnimationFrame(() => this._render());
-  }
-
-  _render() {
-    this._animId = null;
-    const ctx = this.ctx;
-    const cw = this.canvas.width;
-    const ch = this.canvas.height;
-
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, cw, ch);
-
-    if (this._cachedImageData &&
-        this._cachedImageDataW === cw &&
-        this._cachedImageDataH === ch &&
-        !this._bgCacheDirty) {
-      ctx.putImageData(this._cachedImageData, 0, 0);
-      ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      ctx.restore();
-      this._bgCacheDirty = false;
-      this._renderOverlay(ctx);
-      return;
-    }
-
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.restore();
-    this.hitMap = [];
-    this._bgCacheDirty = false;
-
-    if (!this.shelf) {
-      this._drawEmptyState();
-      this._saveBgImageData(ctx, cw, ch);
-      return;
-    }
-
-    this._drawFloorShadow();
-
-    const { rows, cols } = this.shelf;
-    const unitW = 70, unitH = 82, unitD = 60;
-    const shelfW = cols * unitW;
-    const shelfH = rows * unitH;
-
-    const books = [];
-
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const slotIdx = r * cols + c;
-        const slot = this.slots[slotIdx];
-        const bx = c * unitW - shelfW / 2 + unitW / 2;
-        const by = -r * unitH + shelfH / 2 - unitH / 2;
-        const bz = 0;
-        const data = slot || {
-          slot_id: `R${r + 1}-C${c + 1}`,
-          scores: { acidosis: 0, mold: 0, insect: 0, overall: 0, level: 'SAFE' },
-          metrics: {}, prediction: {},
-        };
-        books.push({
-          r, c, bx, by, bz, unitW, unitH, unitD,
-          data, slot,
-        });
-      }
-    }
-
-    const cosY = Math.cos(this.view.rotY);
-    const sinY = Math.sin(this.view.rotY);
-    const cosX = Math.cos(this.view.rotX);
-    const sinX = Math.sin(this.view.rotX);
-
-    books.forEach(b => {
-      const { bx, by, bz } = b;
-      let x1 = bx * cosY - bz * sinY;
-      let z1 = bx * sinY + bz * cosY;
-      let y1 = by;
-      let y2 = y1 * cosX - z1 * sinX;
-      let z2 = y1 * sinX + z1 * cosX;
-      b._sx = this.cx + x1 * this.view.zoom;
-      b._sy = this.cy + y2 * this.view.zoom;
-      b._depth = z2;
-    });
-    books.sort((a, b) => a._depth - b._depth);
-
-    this._drawShelfFrame(books, rows, cols, unitW, unitH, unitD, cosY, sinY, cosX, sinX);
-
-    const heatKey = this.slots.map(s => s?.scores ? `${s.slot_id}:${s.scores.acidosis||0}:${s.scores.mold||0}:${s.scores.insect||0}` : '').join('|');
-    const layersKey = JSON.stringify(this.layers);
-    const fullKey = `${heatKey}|${layersKey}`;
-
-    if (fullKey !== this._prevHeatKey) {
-      this._prevHeatKey = fullKey;
-      this._cachedImageData = null;
-    }
-
-    books.forEach(b => {
-      this._drawSlot(ctx, b, cosY, sinY, cosX, sinX);
-    });
-
-    this._drawLegendOnCanvas();
-
-    this._saveBgImageData(ctx, cw, ch);
-  }
-
-  _saveBgImageData(ctx, cw, ch) {
-    try {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      this._cachedImageData = ctx.getImageData(0, 0, cw, ch);
-      this._cachedImageDataW = cw;
-      this._cachedImageDataH = ch;
-      ctx.restore();
-    } catch (e) {
-      this._cachedImageData = null;
-    }
-  }
-
-  _renderOverlay(ctx) {
-    if (this.hoverSlot && this.shelf) {
-      const { rows, cols } = this.shelf;
-      const unitW = 70, unitH = 82, unitD = 60;
-      const shelfW = cols * unitW;
-      const shelfH = rows * unitH;
-      const cosY = Math.cos(this.view.rotY);
-      const sinY = Math.sin(this.view.rotY);
-      const cosX = Math.cos(this.view.rotX);
-      const sinX = Math.sin(this.view.rotX);
-
-      let slot = this.hoverSlot;
-      if (slot && slot.slot && slot.bx !== undefined) {
-        const pad = 3;
-        const iw = unitW - pad * 2;
-        const ih = unitH - pad * 2;
-        const id = unitD - pad * 2;
-        const corners = [
-          [slot.bx - iw / 2, slot.by + ih / 2, -id / 2],
-          [slot.bx + iw / 2, slot.by + ih / 2, -id / 2],
-          [slot.bx + iw / 2, slot.by + ih / 2,  id / 2],
-          [slot.bx - iw / 2, slot.by + ih / 2,  id / 2],
-          [slot.bx - iw / 2, slot.by - ih / 2, -id / 2],
-          [slot.bx + iw / 2, slot.by - ih / 2, -id / 2],
-          [slot.bx + iw / 2, slot.by - ih / 2,  id / 2],
-          [slot.bx - iw / 2, slot.by - ih / 2,  id / 2],
-        ].map(p => this._project(p[0], p[1], p[2], cosY, sinY, cosX, sinX));
-
-        const hoverInset = 1.5;
-        const frontPath = new Path2D();
-        frontPath.moveTo(corners[4].sx + hoverInset, corners[4].sy + hoverInset);
-        frontPath.lineTo(corners[5].sx - hoverInset, corners[5].sy + hoverInset);
-        frontPath.lineTo(corners[1].sx - hoverInset, corners[1].sy - hoverInset);
-        frontPath.lineTo(corners[0].sx + hoverInset, corners[0].sy - hoverInset);
-        frontPath.closePath();
-        ctx.save();
-        ctx.strokeStyle = 'rgba(253, 224, 71, .9)';
-        ctx.lineWidth = 2;
-        ctx.stroke(frontPath);
-        ctx.restore();
-      }
-    }
-  }
-
-  _project(x, y, z, cosY, sinY, cosX, sinX) {
-    const x1 = x * cosY - z * sinY;
-    const z1 = x * sinY + z * cosY;
-    const y1 = y;
-    const y2 = y1 * cosX - z1 * sinX;
-    return {
-      sx: this.cx + x1 * this.view.zoom,
-      sy: this.cy + y2 * this.view.zoom,
-      depth: y1 * sinX + z1 * cosX,
-    };
-  }
-
-  _drawEmptyState() {
-    const ctx = this.ctx;
-    ctx.fillStyle = 'rgba(148, 163, 184, .3)';
-    ctx.font = '16px "PingFang SC", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('🪵 选择左侧书架，加载3D模型与病害热力图', this.cx, this.cy);
-    ctx.font = '12px sans-serif';
-    ctx.fillStyle = 'rgba(148, 163, 184, .5)';
-    ctx.fillText('可拖拽旋转 · 滚轮缩放 · 点击格口查看详情', this.cx, this.cy + 30);
-  }
-
-  _drawFloorShadow() {
-    const ctx = this.ctx;
-    const cx = this.cx, cy = this.cy + 160;
-    const grad = ctx.createRadialGradient(cx, cy, 10, cx, cy, 350);
-    grad.addColorStop(0, 'rgba(139, 90, 43, 0.18)');
-    grad.addColorStop(1, 'rgba(139, 90, 43, 0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, 380, 90, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  _drawShelfFrame(books, rows, cols, uW, uH, uD, cosY, sinY, cosX, sinX) {
-    const ctx = this.ctx;
-    const w = cols * uW, h = rows * uH;
-    const corners = [
-      [-w / 2,  h / 2, -uD / 2], [ w / 2,  h / 2, -uD / 2],
-      [ w / 2,  h / 2,  uD / 2], [-w / 2,  h / 2,  uD / 2],
-      [-w / 2, -h / 2, -uD / 2], [ w / 2, -h / 2, -uD / 2],
-      [ w / 2, -h / 2,  uD / 2], [-w / 2, -h / 2,  uD / 2],
-    ].map(p => this._project(p[0], p[1], p[2], cosY, sinY, cosX, sinX));
-
-    ctx.save();
-    this._quad(ctx, [corners[4], corners[5], corners[6], corners[7]], '#3d2a18', '#241810');
-    this._quad(ctx, [corners[0], corners[3], corners[7], corners[4]], '#5a3a20', '#3d2818');
-    this._quad(ctx, [corners[5], corners[1], corners[2], corners[6]], '#4a2f1a', '#2d1c10');
-    this._quad(ctx, [corners[0], corners[1], corners[5], corners[4]], '#6b4423', '#4a2e17');
-    this._quad(ctx, [corners[3], corners[2], corners[6], corners[7]], '#8b5a2b', '#5c3a1b');
-
-    for (let r = 1; r < rows; r++) {
-      const yy = h / 2 - r * uH;
-      const p1 = this._project(-w / 2, yy, -uD / 2, cosY, sinY, cosX, sinX);
-      const p2 = this._project( w / 2, yy, -uD / 2, cosY, sinY, cosX, sinX);
-      const p3 = this._project( w / 2, yy,  uD / 2, cosY, sinY, cosX, sinX);
-      const p4 = this._project(-w / 2, yy,  uD / 2, cosY, sinY, cosX, sinX);
-      this._quad(ctx, [p1, p2, p3, p4], '#7a4e28', '#4a2e17', 0.9);
-    }
-    ctx.restore();
-  }
-
-  _quad(ctx, pts, fillTop, fillBot, alpha = 1) {
-    if (pts.length < 4) return;
-    const grad = ctx.createLinearGradient(
-      Math.min(...pts.map(p => p.sx)),
-      Math.min(...pts.map(p => p.sy)),
-      Math.max(...pts.map(p => p.sx)),
-      Math.max(...pts.map(p => p.sy)),
-    );
-    ctx.globalAlpha = alpha;
-    grad.addColorStop(0, fillTop);
-    grad.addColorStop(1, fillBot);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.moveTo(pts[0].sx, pts[0].sy);
-    pts.slice(1).forEach(p => ctx.lineTo(p.sx, p.sy));
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,.4)';
-    ctx.lineWidth = 0.8;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-  }
-
-  _drawSlot(ctx, b, cosY, sinY, cosX, sinX) {
-    const { bx, by, unitW: uW, unitH: uH, unitD: uD, data: d, slot } = b;
-    const pad = 3;
-    const iw = uW - pad * 2;
-    const ih = uH - pad * 2;
-    const id = uD - pad * 2;
-
-    const corners = [
-      [bx - iw / 2, by + ih / 2, -id / 2], [bx + iw / 2, by + ih / 2, -id / 2],
-      [bx + iw / 2, by + ih / 2,  id / 2], [bx - iw / 2, by + ih / 2,  id / 2],
-      [bx - iw / 2, by - ih / 2, -id / 2], [bx + iw / 2, by - ih / 2, -id / 2],
-      [bx + iw / 2, by - ih / 2,  id / 2], [bx - iw / 2, by - ih / 2,  id / 2],
-    ].map(p => this._project(p[0], p[1], p[2], cosY, sinY, cosX, sinX));
-
-    const isHover = this.hoverSlot && slot && this.hoverSlot.slot_id === slot.slot_id;
-    const hoverInset = isHover ? 1.5 : 0;
-
-    let heatColor = null;
-    let heatAlpha = 0;
-    if (slot) {
-      const s = d.scores || {};
-      const components = [];
-      if (this.layers.acidosis) components.push({ v: s.acidosis || 0, c: [99, 102, 241] });
-      if (this.layers.mold) components.push({ v: s.mold || 0, c: [13, 148, 136] });
-      if (this.layers.insect) components.push({ v: s.insect || 0, c: [180, 83, 9] });
-      if (components.length) {
-        let r = 0, g = 0, bl = 0, wsum = 0;
-        components.forEach(cmp => {
-          r += cmp.c[0] * cmp.v;
-          g += cmp.c[1] * cmp.v;
-          bl += cmp.c[2] * cmp.v;
-          wsum += cmp.v;
-        });
-        if (wsum > 0) {
-          heatColor = `rgb(${Math.round(r / wsum)}, ${Math.round(g / wsum)}, ${Math.round(bl / wsum)})`;
-          heatAlpha = Math.min(0.88, 0.2 + wsum / components.length * 0.9);
+        if (this.isDragging) {
+            const dx = e.clientX - this.lastMouseX;
+            const dy = e.clientY - this.lastMouseY;
+            this.viewAngleY += dx * 0.005;
+            this.viewAngleX += dy * 0.005;
+            this.viewAngleX = Math.max(-1.5, Math.min(1.5, this.viewAngleX));
+            this.lastMouseX = e.clientX;
+            this.lastMouseY = e.clientY;
+            this.render();
+        } else {
+            this._checkHover(x, y);
         }
-      }
     }
 
-    const paperColor = slot ? this._paperColorByPh(d.metrics?.ph || 6.8) : '#e8d9b8';
-    const paperGrad = ctx.createLinearGradient(
-      corners[4].sx, corners[4].sy, corners[0].sx, corners[0].sy
-    );
-    paperGrad.addColorStop(0, paperColor);
-    paperGrad.addColorStop(1, this._darken(paperColor, 0.25));
-
-    ctx.save();
-    if (heatColor && heatAlpha > 0) {
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = paperGrad;
-    } else {
-      ctx.fillStyle = paperGrad;
+    _onMouseUp() {
+        this.isDragging = false;
     }
 
-    const frontPath = new Path2D();
-    frontPath.moveTo(corners[4].sx + hoverInset, corners[4].sy + hoverInset);
-    frontPath.lineTo(corners[5].sx - hoverInset, corners[5].sy + hoverInset);
-    frontPath.lineTo(corners[1].sx - hoverInset, corners[1].sy - hoverInset);
-    frontPath.lineTo(corners[0].sx + hoverInset, corners[0].sy - hoverInset);
-    frontPath.closePath();
-    ctx.fill(frontPath);
-    ctx.strokeStyle = isHover ? 'rgba(253, 224, 71, .9)' : 'rgba(30, 20, 10, .7)';
-    ctx.lineWidth = isHover ? 2 : 0.8;
-    ctx.stroke(frontPath);
-
-    if (slot) {
-      this.hitMap.push({ path: frontPath, slot: b });
+    _onClick(e) {
+        if (this.hoveredSlot && this.onSlotClick) {
+            this.selectedSlot = this.hoveredSlot;
+            this.onSlotClick(this.hoveredSlot);
+            this.render();
+        }
     }
 
-    if (heatColor && heatAlpha > 0) {
-      ctx.globalAlpha = heatAlpha;
-      const hGrad = ctx.createRadialGradient(
-        (corners[4].sx + corners[1].sx) / 2, (corners[4].sy + corners[1].sy) / 2, 4,
-        (corners[4].sx + corners[1].sx) / 2, (corners[4].sy + corners[1].sy) / 2, iw * this.view.zoom
-      );
-      hGrad.addColorStop(0, heatColor);
-      hGrad.addColorStop(0.7, this._alphaColor(heatColor, 0.6));
-      hGrad.addColorStop(1, this._alphaColor(heatColor, 0));
-      ctx.fillStyle = hGrad;
-      ctx.fill(frontPath);
-    }
-    ctx.globalAlpha = 1;
-
-    if (slot) {
-      this._drawBookSpines(ctx, corners, d, slot);
+    _onWheel(e) {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        this.zoom = Math.max(0.3, Math.min(3, this.zoom * delta));
+        this.render();
     }
 
-    const lvl = d.scores?.level;
-    if (slot && lvl && lvl !== 'SAFE') {
-      const badgeColors = {
-        LOW: '#65a30d', MEDIUM: '#f59e0b', HIGH: '#ea580c', CRITICAL: '#dc2626',
-      };
-      const bc = badgeColors[lvl] || '#16a34a';
-      const cx = (corners[5].sx + corners[1].sx) / 2;
-      const cy = corners[5].sy + 10;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-      ctx.fillStyle = bc;
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+    setShelves(shelves) {
+        this.shelves = shelves;
     }
-    ctx.restore();
-  }
 
-  _drawBookSpines(ctx, corners, d, slot) {
-    const l = corners[4], r = corners[5], tr = corners[1], tl = corners[0];
-    const topY = (l.sy + tl.sy) / 2;
-    const botY = l.sy;
-    const leftX = l.sx, rightX = r.sx;
-    const width = rightX - leftX;
-    const bookCount = slot?.book_count || 5;
-    const nBooks = Math.max(3, Math.min(12, bookCount));
-    const dynasty = d.book_dynasty || slot?.book_dynasty || '';
-    const spBaseColors = dynasty === '明'
-      ? ['#7a5230', '#8b3a3a', '#2f4858', '#5a4e37', '#6b3a3a']
-      : ['#4a3a6b', '#2c5a4a', '#6b5a3a', '#5b2a3a', '#3a4a6b'];
-
-    for (let i = 0; i < nBooks; i++) {
-      const t = i / nBooks;
-      const t2 = (i + 0.85) / nBooks;
-      const x1 = leftX + t * width + 1;
-      const x2 = leftX + t2 * width - 1;
-      const c = spBaseColors[i % spBaseColors.length];
-      const grad = ctx.createLinearGradient(x1, 0, x2, 0);
-      grad.addColorStop(0, this._darken(c, 0.3));
-      grad.addColorStop(0.5, c);
-      grad.addColorStop(1, this._darken(c, 0.35));
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(x1, botY);
-      ctx.lineTo(x2, botY);
-      const tiltTop = (tr.sx - tl.sx) / nBooks;
-      ctx.lineTo(x2 + tiltTop * 0.1, topY);
-      ctx.lineTo(x1 + tiltTop * 0.1, topY);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,.3)';
-      ctx.lineWidth = 0.4;
-      ctx.stroke();
+    setHeatmapData(data) {
+        this.heatmapData = data;
     }
-  }
 
-  _drawLegendOnCanvas() {
-    const ctx = this.ctx;
-    const x = this.w - 150, y = 14;
-    ctx.fillStyle = 'rgba(15, 23, 42, .75)';
-    ctx.strokeStyle = 'rgba(51, 65, 85, .8)';
-    ctx.lineWidth = 1;
-    this._roundRect(ctx, x, y, 136, 92, 6, true, true);
-    ctx.font = '10px "PingFang SC", sans-serif';
-    ctx.fillStyle = '#94a3b8';
-    ctx.textAlign = 'left';
-    ctx.fillText('病害图例', x + 10, y + 18);
-    const items = [
-      { t: '酸化', c: '#6366f1', on: this.layers.acidosis },
-      { t: '霉变', c: '#0d9488', on: this.layers.mold },
-      { t: '虫蛀', c: '#b45309', on: this.layers.insect },
-    ];
-    items.forEach((it, i) => {
-      const yy = y + 34 + i * 18;
-      ctx.globalAlpha = it.on ? 1 : 0.25;
-      ctx.fillStyle = it.c;
-      ctx.beginPath();
-      ctx.arc(x + 18, yy - 3, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = it.on ? '#e2e8f0' : '#64748b';
-      ctx.fillText(it.t, x + 30, yy);
-      ctx.globalAlpha = 1;
-    });
-  }
+    setHeatmapType(type) {
+        this.heatmapType = type;
+    }
 
-  _roundRect(ctx, x, y, w, h, r, fill, stroke) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-    if (fill) ctx.fill();
-    if (stroke) ctx.stroke();
-  }
+    _checkHover(x, y) {
+        let found = null;
+        const slots = this._getAllSlots();
 
-  _paperColorByPh(ph) {
-    if (ph >= 7.0) return '#f2e6c8';
-    if (ph >= 6.5) return '#ecd9b0';
-    if (ph >= 6.0) return '#e0c087';
-    if (ph >= 5.5) return '#cda468';
-    if (ph >= 5.0) return '#b98a4a';
-    return '#8f6634';
-  }
+        for (let i = slots.length - 1; i >= 0; i--) {
+            const slot = slots[i];
+            if (this._pointInRect(x, y, slot.screenRect)) {
+                found = {
+                    shelfId: slot.shelfId,
+                    slotId: slot.slotId,
+                    data: slot.data
+                };
+                break;
+            }
+        }
 
-  _darken(hex, amt) {
-    const c = hex.replace('#', '');
-    const num = parseInt(c, 16);
-    let r = (num >> 16) & 0xff, g = (num >> 8) & 0xff, b = num & 0xff;
-    r = Math.max(0, Math.round(r * (1 - amt)));
-    g = Math.max(0, Math.round(g * (1 - amt)));
-    b = Math.max(0, Math.round(b * (1 - amt)));
-    return `rgb(${r}, ${g}, ${b})`;
-  }
+        if (found !== this.hoveredSlot) {
+            this.hoveredSlot = found;
+            this.canvas.style.cursor = found ? 'pointer' : 'grab';
+            this.render();
+        }
+    }
 
-  _alphaColor(rgbStr, alpha) {
-    const m = rgbStr.match(/\d+/g);
-    if (!m) return rgbStr;
-    return `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${alpha})`;
-  }
+    _pointInRect(x, y, rect) {
+        return x >= rect.x && x <= rect.x + rect.width &&
+               y >= rect.y && y <= rect.y + rect.height;
+    }
+
+    _getAllSlots() {
+        const slots = [];
+        const shelfWidth = 100;
+        const shelfHeight = 180;
+        const shelfDepth = 30;
+        const slotWidth = 30;
+        const slotHeight = 80;
+        const gap = 5;
+
+        this.shelves.forEach((shelf, shelfIdx) => {
+            const row = Math.floor(shelfIdx / 2);
+            const col = shelfIdx % 2;
+            const baseX = (col - 0.5) * (shelfWidth + 80);
+            const baseY = 0;
+            const baseZ = (row - 1.5) * (shelfDepth + 60);
+
+            const slotsPerRow = 3;
+            const rows = 2;
+            let slotIdx = 0;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < slotsPerRow; c++) {
+                    if (slotIdx >= (shelf.slots || 6)) break;
+
+                    const slotId = `SLOT-${String.fromCharCode(65 + r)}${c + 1}`;
+                    const sx = baseX + (c - slotsPerRow / 2 + 0.5) * (slotWidth + gap);
+                    const sy = baseY + (r - rows / 2 + 0.5) * (slotHeight + gap) + shelfHeight / 4;
+                    const sz = baseZ;
+
+                    const heatmapItem = this.heatmapData.find(
+                        h => h.shelf_id === shelf.shelf_id && h.slot_id === slotId
+                    );
+
+                    const screenRect = this._projectSlot(sx, sy, sz, slotWidth, slotHeight);
+
+                    slots.push({
+                        shelfId: shelf.shelf_id,
+                        slotId: slotId,
+                        data: heatmapItem,
+                        screenRect: screenRect,
+                        z: sz
+                    });
+
+                    slotIdx++;
+                }
+            }
+        });
+
+        return slots.sort((a, b) => a.z - b.z);
+    }
+
+    _project(x, y, z) {
+        const cosY = Math.cos(this.viewAngleY);
+        const sinY = Math.sin(this.viewAngleY);
+        const cosX = Math.cos(this.viewAngleX);
+        const sinX = Math.sin(this.viewAngleX);
+
+        const x1 = x * cosY - z * sinY;
+        const z1 = x * sinY + z * cosY;
+        const y1 = y * cosX - z1 * sinX;
+        const z2 = y * sinX + z1 * cosX;
+
+        const scale = 400 / (400 + z2) * this.zoom;
+        const screenX = this.width / 2 + x1 * scale + this.offsetX;
+        const screenY = this.height / 2 + y1 * scale + this.offsetY;
+
+        return { x: screenX, y: screenY, scale: scale, z: z2 };
+    }
+
+    _projectSlot(x, y, z, w, h) {
+        const topLeft = this._project(x - w / 2, y - h / 2, z);
+        const topRight = this._project(x + w / 2, y - h / 2, z);
+        const bottomLeft = this._project(x - w / 2, y + h / 2, z);
+        const bottomRight = this._project(x + w / 2, y + h / 2, z);
+
+        const minX = Math.min(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x);
+        const maxX = Math.max(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x);
+        const minY = Math.min(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y);
+        const maxY = Math.max(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y);
+
+        return {
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        };
+    }
+
+    _getHeatColor(value, level) {
+        if (this.heatmapType === 'ph') {
+            if (value >= 6.5) return 'rgba(82, 196, 26, 0.8)';
+            if (value >= 6.0) return 'rgba(250, 173, 20, 0.8)';
+            if (value >= 5.5) return 'rgba(255, 77, 79, 0.8)';
+            return 'rgba(207, 19, 34, 0.9)';
+        } else if (this.heatmapType === 'mold') {
+            if (value < 100) return 'rgba(82, 196, 26, 0.7)';
+            if (value < 500) return 'rgba(250, 173, 20, 0.7)';
+            if (value < 2000) return 'rgba(255, 77, 79, 0.7)';
+            return 'rgba(207, 19, 34, 0.9)';
+        } else {
+            if (level === 'normal') return 'rgba(82, 196, 26, 0.7)';
+            if (level === 'warning') return 'rgba(250, 173, 20, 0.7)';
+            return 'rgba(255, 77, 79, 0.8)';
+        }
+    }
+
+    render() {
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, this.width, this.height);
+
+        this._drawGrid();
+        this._drawShelves();
+        this._drawHeatmapSlots();
+
+        if (this.hoveredSlot) {
+            this._drawHoverTooltip();
+        }
+
+        if (this.selectedSlot) {
+            this._drawSelectedHighlight();
+        }
+    }
+
+    _drawGrid() {
+        const ctx = this.ctx;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
+        ctx.lineWidth = 1;
+
+        const gridSize = 50;
+        for (let i = -5; i <= 5; i++) {
+            const p1 = this._project(i * gridSize, 0, -200);
+            const p2 = this._project(i * gridSize, 0, 200);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+        }
+
+        for (let i = -4; i <= 4; i++) {
+            const p1 = this._project(-250, 0, i * gridSize);
+            const p2 = this._project(250, 0, i * gridSize);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+        }
+    }
+
+    _drawShelves() {
+        const ctx = this.ctx;
+        const shelfWidth = 100;
+        const shelfHeight = 180;
+        const shelfDepth = 30;
+
+        const shelfDrawList = [];
+
+        this.shelves.forEach((shelf, idx) => {
+            const row = Math.floor(idx / 2);
+            const col = idx % 2;
+            const x = (col - 0.5) * (shelfWidth + 80);
+            const y = 0;
+            const z = (row - 1.5) * (shelfDepth + 60);
+
+            const center = this._project(x, y, z);
+            shelfDrawList.push({ shelf, x, y, z, centerZ: center.z, idx });
+        });
+
+        shelfDrawList.sort((a, b) => a.centerZ - b.centerZ);
+
+        shelfDrawList.forEach(item => {
+            this._drawSingleShelf(item.x, item.y, item.z, shelfWidth, shelfHeight, shelfDepth, item.shelf);
+        });
+    }
+
+    _drawSingleShelf(x, y, z, w, h, d, shelfData) {
+        const ctx = this.ctx;
+
+        const faces = [];
+
+        const frontTopLeft = this._project(x - w / 2, y - h / 2, z + d / 2);
+        const frontTopRight = this._project(x + w / 2, y - h / 2, z + d / 2);
+        const frontBottomLeft = this._project(x - w / 2, y + h / 2, z + d / 2);
+        const frontBottomRight = this._project(x + w / 2, y + h / 2, z + d / 2);
+
+        const backTopLeft = this._project(x - w / 2, y - h / 2, z - d / 2);
+        const backTopRight = this._project(x + w / 2, y - h / 2, z - d / 2);
+        const backBottomLeft = this._project(x - w / 2, y + h / 2, z - d / 2);
+        const backBottomRight = this._project(x + w / 2, y + h / 2, z - d / 2);
+
+        faces.push({
+            type: 'top',
+            z: (backTopLeft.z + backTopRight.z) / 2,
+            points: [frontTopLeft, frontTopRight, backTopRight, backTopLeft],
+            color: '#c89b6c'
+        });
+
+        faces.push({
+            type: 'left',
+            z: (backTopLeft.z + backBottomLeft.z) / 2,
+            points: [frontTopLeft, backTopLeft, backBottomLeft, frontBottomLeft],
+            color: '#a67c52'
+        });
+
+        faces.push({
+            type: 'right',
+            z: (frontTopRight.z + frontBottomRight.z) / 2,
+            points: [frontTopRight, frontBottomRight, backBottomRight, backTopRight],
+            color: '#8B6914'
+        });
+
+        faces.push({
+            type: 'back',
+            z: (backTopLeft.z + backBottomRight.z) / 2,
+            points: [backTopLeft, backTopRight, backBottomRight, backBottomLeft],
+            color: '#8B7355'
+        });
+
+        faces.push({
+            type: 'bottom',
+            z: (frontBottomLeft.z + frontBottomRight.z) / 2,
+            points: [frontBottomLeft, backBottomLeft, backBottomRight, frontBottomRight],
+            color: '#9c7a4f'
+        });
+
+        faces.sort((a, b) => a.z - b.z);
+
+        faces.forEach(face => {
+            ctx.beginPath();
+            ctx.moveTo(face.points[0].x, face.points[0].y);
+            for (let i = 1; i < face.points.length; i++) {
+                ctx.lineTo(face.points[i].x, face.points[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = face.color;
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(80, 50, 20, 0.5)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        });
+
+        const shelfY1 = y - h / 2 + h / 3;
+        const shelfY2 = y + h / 2 - h / 3;
+
+        const y1Front = this._project(0, shelfY1, z + d / 2);
+        const y1Back = this._project(0, shelfY1, z - d / 2);
+        const y2Front = this._project(0, shelfY2, z + d / 2);
+        const y2Back = this._project(0, shelfY2, z - d / 2);
+
+        ctx.strokeStyle = '#6b4423';
+        ctx.lineWidth = 2;
+
+        ctx.beginPath();
+        ctx.moveTo(y1Front.x - w / 2 * frontTopLeft.scale, y1Front.y);
+        ctx.lineTo(y1Front.x + w / 2 * frontTopRight.scale, y1Front.y);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(y2Front.x - w / 2 * frontBottomLeft.scale, y2Front.y);
+        ctx.lineTo(y2Front.x + w / 2 * frontBottomRight.scale, y2Front.y);
+        ctx.stroke();
+
+        const labelPos = this._project(x, y - h / 2 - 15, z);
+        ctx.font = '12px Microsoft YaHei';
+        ctx.fillStyle = '#333';
+        ctx.textAlign = 'center';
+        ctx.fillText(shelfData.shelf_id || `书架`, labelPos.x, labelPos.y);
+    }
+
+    _drawHeatmapSlots() {
+        const ctx = this.ctx;
+        const slotWidth = 28;
+        const slotHeight = 75;
+        const gap = 5;
+
+        const slotDrawList = [];
+
+        this.shelves.forEach((shelf, shelfIdx) => {
+            const row = Math.floor(shelfIdx / 2);
+            const col = shelfIdx % 2;
+            const baseX = (col - 0.5) * (100 + 80);
+            const baseY = 0;
+            const baseZ = (row - 1.5) * (30 + 60);
+
+            const slotsPerRow = 3;
+            const rows = 2;
+            let slotIdx = 0;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < slotsPerRow; c++) {
+                    if (slotIdx >= (shelf.slots || 6)) break;
+
+                    const slotId = `SLOT-${String.fromCharCode(65 + r)}${c + 1}`;
+                    const sx = baseX + (c - slotsPerRow / 2 + 0.5) * (slotWidth + gap);
+                    const sy = baseY + (r - rows / 2 + 0.5) * (slotHeight + gap) + 180 / 4;
+                    const sz = baseZ + 8;
+
+                    const heatmapItem = this.heatmapData.find(
+                        h => h.shelf_id === shelf.shelf_id && h.slot_id === slotId
+                    );
+
+                    const center = this._project(sx, sy, sz);
+
+                    slotDrawList.push({
+                        shelfId: shelf.shelf_id,
+                        slotId,
+                        x: sx,
+                        y: sy,
+                        z: sz,
+                        width: slotWidth,
+                        height: slotHeight,
+                        data: heatmapItem,
+                        centerZ: center.z
+                    });
+
+                    slotIdx++;
+                }
+            }
+        });
+
+        slotDrawList.sort((a, b) => a.centerZ - b.z);
+
+        slotDrawList.forEach(slot => {
+            this._drawSingleSlot(slot);
+        });
+    }
+
+    _drawSingleSlot(slot) {
+        const ctx = this.ctx;
+        const w = slot.width;
+        const h = slot.height;
+
+        const topLeft = this._project(slot.x - w / 2, slot.y - h / 2, slot.z);
+        const topRight = this._project(slot.x + w / 2, slot.y - h / 2, slot.z);
+        const bottomLeft = this._project(slot.x - w / 2, slot.y + h / 2, slot.z);
+        const bottomRight = this._project(slot.x + w / 2, slot.y + h / 2, slot.z);
+
+        const value = slot.data ? slot.data.value : 0;
+        const level = slot.data ? slot.data.level : 'normal';
+        const color = this._getHeatColor(value, level);
+
+        ctx.beginPath();
+        ctx.moveTo(topLeft.x, topLeft.y);
+        ctx.lineTo(topRight.x, topRight.y);
+        ctx.lineTo(bottomRight.x, bottomRight.y);
+        ctx.lineTo(bottomLeft.x, bottomLeft.y);
+        ctx.closePath();
+
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(80, 50, 20, 0.6)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 0.5;
+        for (let i = 1; i < 5; i++) {
+            const yRatio = i / 5;
+            const leftX = topLeft.x + (bottomLeft.x - topLeft.x) * yRatio;
+            const leftY = topLeft.y + (bottomLeft.y - topLeft.y) * yRatio;
+            const rightX = topRight.x + (bottomRight.x - topRight.y) * yRatio;
+            const rightY = topRight.y + (bottomRight.y - topRight.y) * yRatio;
+
+            ctx.beginPath();
+            ctx.moveTo(leftX, leftY);
+            ctx.lineTo(rightX, rightY);
+            ctx.stroke();
+        }
+
+        const isHovered = this.hoveredSlot &&
+            this.hoveredSlot.shelfId === slot.shelfId &&
+            this.hoveredSlot.slotId === slot.slotId;
+
+        const isSelected = this.selectedSlot &&
+            this.selectedSlot.shelfId === slot.shelfId &&
+            this.selectedSlot.slotId === slot.slotId;
+
+        if (isHovered || isSelected) {
+            ctx.strokeStyle = isSelected ? '#1890ff' : '#fff';
+            ctx.lineWidth = isSelected ? 3 : 2;
+            ctx.beginPath();
+            ctx.moveTo(topLeft.x, topLeft.y);
+            ctx.lineTo(topRight.x, topRight.y);
+            ctx.lineTo(bottomRight.x, bottomRight.y);
+            ctx.lineTo(bottomLeft.x, bottomLeft.y);
+            ctx.closePath();
+            ctx.stroke();
+        }
+    }
+
+    _drawHoverTooltip() {
+        if (!this.hoveredSlot) return;
+
+        const ctx = this.ctx;
+        const slot = this.hoveredSlot;
+
+        const heatmapItem = this.heatmapData.find(
+            h => h.shelf_id === slot.shelfId && h.slot_id === slot.slotId
+        );
+
+        let text = `${slot.shelfId} / ${slot.slotId}`;
+        if (heatmapItem) {
+            if (this.heatmapType === 'ph') {
+                text += `\npH: ${heatmapItem.value.toFixed(2)}`;
+            } else if (this.heatmapType === 'mold') {
+                text += `\n霉菌: ${heatmapItem.value.toFixed(0)} CFU/m³`;
+            } else {
+                text += `\n风险值: ${heatmapItem.value.toFixed(1)}`;
+            }
+            if (heatmapItem.book_title) {
+                text += `\n${heatmapItem.book_title}`;
+            }
+        }
+
+        const lines = text.split('\n');
+        const padding = 8;
+        const lineHeight = 18;
+        const width = 150;
+        const height = lines.length * lineHeight + padding * 2;
+
+        const mouseX = this.lastMouseX - this.canvas.getBoundingClientRect().left;
+        const mouseY = this.lastMouseY - this.canvas.getBoundingClientRect().top;
+
+        let x = mouseX + 15;
+        let y = mouseY + 15;
+
+        if (x + width > this.width) x = mouseX - width - 15;
+        if (y + height > this.height) y = mouseY - height - 15;
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.beginPath();
+        ctx.roundRect(x, y, width, height, 6);
+        ctx.fill();
+
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px Microsoft YaHei';
+        ctx.textAlign = 'left';
+
+        lines.forEach((line, i) => {
+            ctx.fillText(line, x + padding, y + padding + (i + 1) * lineHeight - 4);
+        });
+    }
+
+    _drawSelectedHighlight() {
+    }
+
+    zoomIn() {
+        this.zoom = Math.min(3, this.zoom * 1.2);
+        this.render();
+    }
+
+    zoomOut() {
+        this.zoom = Math.max(0.3, this.zoom / 1.2);
+        this.render();
+    }
+
+    resetView() {
+        this.viewAngleX = 0.6;
+        this.viewAngleY = 0.3;
+        this.zoom = 1;
+        this.offsetX = 0;
+        this.offsetY = 0;
+        this.selectedSlot = null;
+        this.render();
+    }
+
+    rotateLeft() {
+        this.viewAngleY -= 0.2;
+        this.render();
+    }
+
+    rotateRight() {
+        this.viewAngleY += 0.2;
+        this.render();
+    }
+
+    focusShelf(shelfId) {
+        const idx = this.shelves.findIndex(s => s.shelf_id === shelfId);
+        if (idx >= 0) {
+            const row = Math.floor(idx / 2);
+            const col = idx % 2;
+            this.offsetX = -col * 50;
+            this.offsetY = (row - 1) * 30;
+            this.zoom = 1.5;
+            this.render();
+        }
+    }
 }
